@@ -1,0 +1,5 @@
+/* Tailwind v4 single import */
+@import "tailwindcss";
+
+/* (Optional) small body reset so the gradient fills */
+html, body, #root { height: 100%; }
