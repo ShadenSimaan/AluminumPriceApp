@@ -1,5 +1,81 @@
+
 /* Tailwind v4 single import */
 @import "tailwindcss";
 
-/* (Optional) small body reset so the gradient fills */
-html, body, #root { height: 100%; }
+/* Global resets + RTL helpers + safe-area paddings */
+:root {
+  --vh: 1; /* set in main.tsx */
+  --card-bg: 255 255 255;      /* white-ish */
+  --card-shadow: 0 10px 30px rgba(2, 6, 23, 0.08);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+}
+
+html[dir="rtl"] {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: rgb(15 23 42);              /* slate-900 */
+  background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
+  scrollbar-gutter: stable;          /* reduce layout shifts on desktop */
+}
+
+.container-app {
+  min-height: calc(var(--vh) * 100);
+  padding: calc(env(safe-area-inset-top) + 16px) 12px calc(env(safe-area-inset-bottom) + 16px);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  overflow-x: clip;                  /* never horizontal overflow */
+}
+
+.card {
+  background: rgb(var(--card-bg));
+  box-shadow: var(--card-shadow);
+  border-radius: 1rem;               /* rounded-xl */
+}
+
+/* Dialog layout constraints (phone-safe) */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2,6,23,0.5);
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  z-index: 50;
+}
+
+.modal-panel {
+  width: min(calc(100vw - 16px), 48rem);
+  max-height: calc(var(--vh) * 100 - 32px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-body {
+  overflow: auto;
+}
+
+/* Tables inside cards: horizontal scroll on small phones */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.table-inner-min {
+  min-width: 720px; /* as requested */
+}
+
+/* Focus rings */
+:focus-visible {
+  outline: 2px solid rgb(14 165 233); /* sky-500 */
+  outline-offset: 2px;
+}

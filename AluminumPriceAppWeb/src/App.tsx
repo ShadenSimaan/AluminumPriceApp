@@ -1,21 +1,9 @@
-import React, { useMemo, useState, useEffect } from "react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-import { Trash2, Plus, Settings, Download, Edit3, Save, X, UserPlus, FilePlus2, Users } from "lucide-react";
+// FILE: src/App.tsx
+import React, { useEffect, useMemo, useState } from "react";
 
-// PDF export (robust for different autotable builds)
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-
-// ------------------------------------------------------
-// Types
-// ------------------------------------------------------
+/** =========================
+ *  Types (per requirements)
+ *  ========================= */
 type Customer = {
   id: string;
   name: string;
@@ -28,880 +16,1223 @@ type Customer = {
 type Quote = {
   id: string;
   customerId: string;
-  title: string;
-  date: number; // epoch ms
-  items: any[];
-  taxPercent: number;
+  title: string;       // internal only (for filename)
+  date: number;        // epoch ms
+  items: LineItem[];
+  taxPercent: number;  // accepts 0.18 or 18
   totals: { sub: number; tax: number; grand: number };
 };
 
-// ------------------------------------------------------
-// הגדרות כלליות
-// ------------------------------------------------------
-const STORAGE_KEY = "aluminum-quote-app:v6b-hebrew-font+customers";
-
-function usePersistentState<T>(defaultValue: T) {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : defaultValue;
-    } catch (e) {
-      return defaultValue;
-    }
-  });
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
-  }, [value]);
-  return [value, setValue] as const;
-}
-
-// בסיס התמחור תמיד לפי מ"ר
-const defaultProfiles = [
-  { id: "std-area", name: "פרופיל סטנדרט (למ״ר)", unit: "m2", basis: "area", price: 350 },
-  { id: "slim-area", name: "פרופיל דק (למ״ר)", unit: "m2", basis: "area", price: 420 },
-  { id: "thermal-area", name: "טרמוקפל (למ״ר)", unit: "m2", basis: "area", price: 480 },
-];
-
-// תוספות ברירת־מחדל
-const defaultAddonsPresets = [
-  { id: "dry-keep", name: "מנגנון דרי קיף", price: 650 },
-  { id: "somfy-nice", name: "מנוע חשמלי סומפי או נייס", price: 800 },
-  { id: "china-motor", name: "מנוע סיני", price: 300 },
-];
-
-const defaultData = {
-  company: {
-    sellerName: "שם העסק שלך",
-    sellerDetails: "כתובת, עיר, טלפון, אימייל",
-    logoText: "ALU-QUOTES",
-  },
-  profiles: defaultProfiles,
-  items: [] as any[],
-  customers: [] as Customer[],
-  quotes: [] as Quote[],
-  // ברירת מחדל בישראל: 18% מע"מ (אפשר להזין 0.18 או 18)
-  taxPercent: 0.18,
-  notes: "הצעה תקפה ל-14 יום. זמן אספקה 21 ימי עסקים מרגע אישור ותשלום מקדמה.",
+type Profile = {
+  id: string;
+  name: string;
+  unitPrice: number; // price per m²
 };
 
-function n(v: any) { return Number.isFinite(Number(v)) ? Number(v) : 0; }
-const numIL = new Intl.NumberFormat("he-IL", { maximumFractionDigits: 2 });
-const moneyIL = new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS", maximumFractionDigits: 2 });
-function fmt(x: number){ return numIL.format(x||0); }
-function ils(x: number){ return moneyIL.format(x||0); }
+type Addon = {
+  id: string;
+  name: string;
+  price: string;      // text input (per item)
+  checked: boolean;
+};
 
-// ------------------------------------------------------
-// Hebrew font loader (Noto Sans Hebrew) for jsPDF
-// Put file at: public/fonts/NotoSansHebrew-Regular.ttf
-// ------------------------------------------------------
-let hebrewFontRegistered = false;
-async function ensureHebrewFont(doc?: jsPDF) {
-  if (hebrewFontRegistered) return;
+type LineItem = {
+  id: string;
+  widthCm: string; // text input
+  heightCm: string; // text input
+  qty: string; // text input
+  profileId?: string;
+  profileName?: string;
+  unitPrice: string; // from profile by default but editable
+  location?: string;
+  details?: string;
+  addons: Addon[];
+  subtotal: number;   // computed
+};
+
+type AppState = {
+  customers: Customer[];
+  quotes: Quote[];
+  profiles: Profile[];
+  current: {
+    customerName: string;
+    customerPhone: string;
+    customerEmail: string;
+    customerNotes: string;
+    title: string;
+    items: LineItem[];
+    taxPercentText: string;
+    notes: string;
+  };
+  ui: {
+    tab: "quote" | "customers";
+    settingsOpen: boolean;
+  };
+};
+
+/** =========================
+ *  Constants & Utilities
+ *  ========================= */
+const LS_KEY = "aluminum-quote-app:new-mobile-style-v1";
+
+function uuid() {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  const buf = new Uint8Array(16);
+  (crypto as any).getRandomValues?.(buf);
+  buf[6] = (buf[6] & 0x0f) | 0x40;
+  buf[8] = (buf[8] & 0x3f) | 0x80;
+  const toHex = (n: number) => n.toString(16).padStart(2, "0");
+  return [...buf].map(toHex).join("");
+}
+
+function parseLooseNumber(s: string): number {
+  if (!s || !s.trim()) return 0;
+  const cleaned = s.replace(/[^\d.,-]/g, "").replace(",", ".");
+  const n = parseFloat(cleaned);
+  return isFinite(n) ? n : 0;
+}
+
+// Accept 0.18 or 18, return decimal (0.18)
+function normalizeTaxPercent(n: number): number {
+  if (n === 0) return 0;
+  if (n > 1.0) return n / 100;
+  return n;
+}
+
+const fmtNumber = new Intl.NumberFormat("he-IL", { maximumFractionDigits: 2 });
+const fmtCurrency = new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS" });
+const fmtDate = new Intl.DateTimeFormat("he-IL", { dateStyle: "medium" });
+
+const defaultProfiles: Profile[] = [
+  { id: uuid(), name: "4300", unitPrice: 520 },
+  { id: uuid(), name: "5600", unitPrice: 590 },
+  { id: uuid(), name: "7300", unitPrice: 690 },
+  { id: uuid(), name: "7600", unitPrice: 740 },
+];
+
+const defaultAddonsPreset: Addon[] = [
+  { id: uuid(), name: "רשת", price: "80", checked: false },
+  { id: uuid(), name: "פרזול איכותי", price: "120", checked: false },
+  { id: uuid(), name: "תריס גלילה", price: "0", checked: false },
+];
+
+/** ===== Default state (used for migration/fallback) ===== */
+const DEFAULT_STATE: AppState = {
+  customers: [],
+  quotes: [],
+  profiles: defaultProfiles,
+  current: {
+    customerName: "",
+    customerPhone: "",
+    customerEmail: "",
+    customerNotes: "",
+    title: "הצעת מחיר",
+    items: [],
+    taxPercentText: "17",
+    notes: "",
+  },
+  ui: { tab: "quote", settingsOpen: false },
+};
+
+/** ===== Validate + migrate any LS object to the proper shape ===== */
+function hydrateState(): AppState {
+  const raw = localStorage.getItem(LS_KEY);
+  if (!raw) return structuredClone(DEFAULT_STATE);
+
   try {
-    const res = await fetch("/fonts/NotoSansHebrew-Regular.ttf");
-    if (!res.ok) throw new Error("font not found");
-    const buf = await res.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-    const tmp = doc || new jsPDF();
-    (tmp as any).addFileToVFS("NotoSansHebrew-Regular.ttf", base64);
-    (tmp as any).addFont("NotoSansHebrew-Regular.ttf", "NotoSansHebrew", "normal");
-    hebrewFontRegistered = true;
+    const parsed = JSON.parse(raw);
+    // Basic guards
+    const obj: Partial<AppState> = typeof parsed === "object" && parsed ? parsed : {};
+
+    const customers = Array.isArray(obj.customers) ? obj.customers : [];
+    const quotes = Array.isArray(obj.quotes) ? obj.quotes : [];
+    const profiles = Array.isArray(obj.profiles) && obj.profiles.length > 0 ? obj.profiles : defaultProfiles;
+
+    const currentRaw: any = obj.current ?? {};
+    const current = {
+      customerName: String(currentRaw.customerName ?? ""),
+      customerPhone: String(currentRaw.customerPhone ?? ""),
+      customerEmail: String(currentRaw.customerEmail ?? ""),
+      customerNotes: String(currentRaw.customerNotes ?? ""),
+      title: String(currentRaw.title ?? "הצעת מחיר"),
+      items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
+      taxPercentText: String(currentRaw.taxPercentText ?? "17"),
+      notes: String(currentRaw.notes ?? ""),
+    };
+
+    const uiRaw: any = obj.ui ?? {};
+    const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
+    const ui = { tab, settingsOpen: Boolean(uiRaw.settingsOpen ?? false) };
+
+    const safe: AppState = { customers, quotes, profiles, current, ui };
+    return safe;
   } catch (e) {
-    console.warn("Hebrew font missing. Create public/fonts/NotoSansHebrew-Regular.ttf", e);
+    // Backup the broken value once, then fall back to defaults
+    try {
+      localStorage.setItem(LS_KEY + ":backup", raw!);
+    } catch {}
+    return structuredClone(DEFAULT_STATE);
   }
 }
 
-export default function AluminumQuotationApp() {
-  const [data, setData] = usePersistentState(defaultData);
-  const [view, setView] = useState<"quote"|"customers">("quote");
+/** =========================
+ *  App Component
+ *  ========================= */
+export default function App() {
+  const [state, setState] = useState<AppState>(() => hydrateState());
 
-  // קלטים ב-ס"מ
-  const [wCm, setWCm] = useState(100);
-  const [hCm, setHCm] = useState(100);
-  const [qty, setQty] = useState(1);
-  const [selectedProfileId, setSelectedProfileId] = useState((data.profiles[0] ? data.profiles[0].id : ""));
-  const [customUnitPrice, setCustomUnitPrice] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [editingProfile, setEditingProfile] = useState<any>(null);
-  const [quoteTitle, setQuoteTitle] = useState("הצעת מחיר אלומיניום");
-  const [loc, setLoc] = useState(""); // מיקום
-  const [details, setDetails] = useState(""); // פרטים
-
-  const [currentCustomerId, setCurrentCustomerId] = useState<string>(data.customers[0]?.id || "");
-  const currentCustomer: Customer | undefined = useMemo(() => data.customers.find(c => c.id === currentCustomerId), [data.customers, currentCustomerId]);
-
-  // מצב תוספות לשורת פריט חדשה
-  const [addonStates, setAddonStates] = useState(() =>
-    defaultAddonsPresets.map(a => ({ ...a, checked: false }))
-  );
-
+  // Persist on change
   useEffect(() => {
-    if (!data.profiles.find((p: any) => p.id === selectedProfileId) && data.profiles.length) {
-      setSelectedProfileId(data.profiles[0].id);
-    }
-  }, [data.profiles, selectedProfileId]);
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  }, [state]);
 
-  // ---------- חישובי פריט ----------
-  const selectedProfile = useMemo(function(){
-    return data.profiles.find((p: any) => p.id === selectedProfileId) || null;
-  }, [data.profiles, selectedProfileId]);
+  /** ======= Derived values & helpers ======= */
+  const taxDecimal = normalizeTaxPercent(parseLooseNumber(state.current?.taxPercentText ?? "17"));
+  const subTotal = useMemo(
+    () => state.current.items.reduce((a, it) => a + it.subtotal, 0),
+    [state.current.items]
+  );
+  const taxValue = subTotal * taxDecimal;
+  const grandTotal = subTotal + taxValue;
 
-  // לפי הדרישה: תמיד מחיר לפי שטח (רוחב×גובה)
-  const unitPrice = customUnitPrice !== "" ? Number(customUnitPrice) : ((selectedProfile ? selectedProfile.price : 0));
+  function updateCurrent<K extends keyof AppState["current"]>(key: K, val: AppState["current"][K]) {
+    setState((s) => ({ ...s, current: { ...s.current, [key]: val } }));
+  }
 
-  // המרה מס"מ למטרים לצורך תמחור
-  const wM = useMemo(function(){ return n(wCm) / 100; }, [wCm]);
-  const hM = useMemo(function(){ return n(hCm) / 100; }, [hCm]);
-  const areaM2 = useMemo(function(){ return wM * hM; }, [wM, hM]);
+  function addItem(currentDraft?: Partial<LineItem>) {
+    const widthCm = currentDraft?.widthCm ?? "";
+    const heightCm = currentDraft?.heightCm ?? "";
+    const qtyText = currentDraft?.qty ?? "";
+    const unitPriceText = currentDraft?.unitPrice ?? "0";
+    const w = parseLooseNumber(widthCm);
+    const h = parseLooseNumber(heightCm);
+    const qty = Math.max(0, parseLooseNumber(qtyText));
+    const area = (w * h) / 10000; // m²
+    const addonsPerItem = (currentDraft?.addons ?? []).reduce((sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+    const unitPriceNum = parseLooseNumber(unitPriceText);
+    const perItemPrice = area * unitPriceNum + addonsPerItem;
+    const subtotal = perItemPrice * qty;
 
-  // חישוב תוספות נבחרות
-  const addonsSelected = useMemo(function(){
-    return addonStates.filter((a: any) => a.checked).map((a: any) => ({ id: a.id, name: a.name, price: n(a.price) }));
-  }, [addonStates]);
-  const addonsTotal = useMemo(function(){
-    return addonsSelected.reduce((sum: number, a: any) => sum + n(a.price), 0);
-  }, [addonsSelected]);
-
-  // לפי הדרישה: נמדד תמיד לפי שטח במ"ר
-  const measured = areaM2; // ביחידות מ"ר
-  const lineSubtotal = useMemo(function(){
-    // מחיר פרופיל לשטח + סכום תוספות, כפול כמות
-    return (measured * unitPrice + addonsTotal) * n(qty);
-  }, [measured, unitPrice, addonsTotal, qty]);
-
-  // ---------- סה"כ והמע"מ ----------
-  const taxRate = useMemo(function(){
-    const val = Number(data.taxPercent);
-    return val <= 1 ? val : val / 100;
-  }, [data.taxPercent]);
-
-  const totals = useMemo(function(){
-    const sub = data.items.reduce((acc: number, it: any) => acc + it.subtotal, 0);
-    const tax = sub * taxRate;
-    return { sub, tax, grand: sub + tax };
-  }, [data.items, taxRate]);
-
-  // ---------- פעולות ----------
-  function addLineItem() {
-    if (!selectedProfile) return;
-
-    const itemAddons = addonsSelected; // כבר מחושבים
-    const addonsLabel = itemAddons.length
-      ? " | תוספות: " + itemAddons.map((a: any) => a.name + " (" + ils(a.price) + ")").join(", ")
-      : "";
-
-    const item = {
-      id: (crypto && (crypto as any).randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())),
-      profileId: selectedProfile.id,
-      profileName: selectedProfile.name,
-      basis: "area",
-      // נשמור ס"מ לשם הצגה בטבלה והמרה במידת הצורך
-      wCm: n(wCm),
-      hCm: n(hCm),
-      loc: loc,
-      details: (details || "") + addonsLabel,
-      qty: n(qty),
-      unitPrice: Number(unitPrice),
-      measured: measured,
-      addons: itemAddons,
-      addonsTotal: addonsTotal,
-      subtotal: (measured * Number(unitPrice) + addonsTotal) * n(qty),
+    const item: LineItem = {
+      id: uuid(),
+      widthCm,
+      heightCm,
+      qty: qtyText,
+      profileId: currentDraft?.profileId,
+      profileName: currentDraft?.profileName,
+      unitPrice: unitPriceText,
+      location: currentDraft?.location ?? "",
+      details: currentDraft?.details ?? "",
+      addons: (currentDraft?.addons ?? []).map((a) => ({ ...a })),
+      subtotal,
     };
 
-    setData(function(prev: any){ return { ...prev, items: prev.items.concat(item) }; });
-    // ניקוי שדות אחרי הוספה
-    setLoc("");
-    setDetails("");
-    setAddonStates(defaultAddonsPresets.map(function(a){ return { ...a, checked: false }; }));
+    setState((s) => ({
+      ...s,
+      current: { ...s.current, items: [...s.current.items, item] },
+    }));
   }
 
   function removeItem(id: string) {
-    setData(function(prev: any){ return { ...prev, items: prev.items.filter((i: any) => i.id !== id) }; });
-  }
-  function resetItems() {
-    setData(function(prev: any){ return { ...prev, items: [] }; });
-  }
-  function upsertProfile(p: any) {
-    // הבסיס תמיד מ"ר — נכפה זאת
-    const normalized = { ...p, basis: 'area', unit: 'm2' };
-    setData(function(prev: any){
-      const exists = prev.profiles.some((x: any) => x.id === normalized.id);
-      const profiles = exists ? prev.profiles.map((x: any) => x.id === normalized.id ? normalized : x) : prev.profiles.concat(normalized);
-      return { ...prev, profiles };
-    });
-  }
-  function deleteProfile(p: any) {
-    setData(function(prev: any){ return { ...prev, profiles: prev.profiles.filter((x: any) => x.id !== p.id) }; });
+    setState((s) => ({ ...s, current: { ...s.current, items: s.current.items.filter((it) => it.id !== id) } }));
   }
 
-  // ---------- Customers CRUD ----------
-  function addCustomer(partial?: Partial<Customer>) {
-    const c: Customer = {
-      id: crypto.randomUUID(),
-      name: partial?.name || "לקוח חדש",
-      phone: partial?.phone || "",
-      email: partial?.email || "",
-      notes: partial?.notes || "",
-      createdAt: Date.now(),
+  function clearCurrentForm() {
+    setItemEditor(initItemEditor());
+  }
+
+  function newQuote() {
+    setState((s) => ({
+      ...s,
+      current: { ...s.current, title: "הצעת מחיר", items: [], notes: "", taxPercentText: s.current.taxPercentText ?? "17" },
+    }));
+    setItemEditor(initItemEditor());
+    setActiveProfileId(s.profiles[0]?.id ?? undefined);
+  }
+
+  /** ======= Item Editor (inline calculator) ======= */
+  function initItemEditor(): LineItem {
+    return {
+      id: uuid(),
+      widthCm: "",
+      heightCm: "",
+      qty: "1",
+      profileId: undefined,
+      profileName: "",
+      unitPrice: "0",
+      location: "",
+      details: "",
+      addons: defaultAddonsPreset.map((a) => ({ ...a })),
+      subtotal: 0,
     };
-    setData((v: any) => ({ ...v, customers: [...v.customers, c] }));
-    setCurrentCustomerId(c.id);
   }
-  function updateCustomer(c: Customer) {
-    setData((v: any) => ({ ...v, customers: v.customers.map((x: Customer) => x.id === c.id ? c : x) }));
-  }
-  function deleteCustomer(id: string) {
-    setData((v: any) => ({ ...v, customers: v.customers.filter((x: Customer) => x.id !== id), quotes: v.quotes.filter((q: Quote)=> q.customerId !== id) }));
-    if (currentCustomerId === id) setCurrentCustomerId("");
+  const [itemEditor, setItemEditor] = useState<LineItem>(initItemEditor());
+  const [activeProfileId, setActiveProfileId] = useState<string | undefined>(undefined);
+
+  // Initialize default selected profile once after load (if exists)
+  useEffect(() => {
+    setActiveProfileId((prev) => prev ?? (state.profiles[0]?.id ?? undefined));
+  }, [state.profiles]);
+
+  useEffect(() => {
+    const p = state.profiles.find((p) => p.id === activeProfileId);
+    setItemEditor((e) => ({ ...e, profileId: p?.id, profileName: p?.name, unitPrice: p ? String(p.unitPrice) : e.unitPrice }));
+  }, [activeProfileId, state.profiles]);
+
+  const liveArea = useMemo(() => {
+    const w = parseLooseNumber(itemEditor.widthCm);
+    const h = parseLooseNumber(itemEditor.heightCm);
+    return (w * h) / 10000;
+  }, [itemEditor.widthCm, itemEditor.heightCm]);
+
+  const liveAddonsSumPerItem = useMemo(
+    () => itemEditor.addons.reduce((sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0), 0),
+    [itemEditor.addons]
+  );
+
+  const livePerItemPrice = useMemo(() => {
+    const unit = parseLooseNumber(itemEditor.unitPrice);
+    return liveArea * unit + liveAddonsSumPerItem;
+  }, [liveArea, itemEditor.unitPrice, liveAddonsSumPerItem]);
+
+  const liveQty = useMemo(() => Math.max(0, parseLooseNumber(itemEditor.qty)), [itemEditor.qty]);
+  const liveLineSubtotal = useMemo(() => livePerItemPrice * liveQty, [livePerItemPrice, liveQty]);
+
+  /** ======= Customers + Quotes helpers ======= */
+  function ensureCustomerByName(name: string, phone?: string, email?: string, notes?: string): Customer {
+    const trimmed = name.trim();
+    const existing = state.customers.find((c) => c.name === trimmed);
+    if (existing) {
+      const updated: Customer = { ...existing, phone: phone || existing.phone, email: email || existing.email, notes: notes ?? existing.notes };
+      if (JSON.stringify(updated) !== JSON.stringify(existing)) {
+        setState((s) => ({
+          ...s,
+          customers: s.customers.map((c) => (c.id === updated.id ? updated : c)),
+        }));
+      }
+      return updated;
+    }
+    const created: Customer = { id: uuid(), name: trimmed, phone, email, notes, createdAt: Date.now() };
+    setState((s) => ({ ...s, customers: [...s.customers, created] }));
+    return created;
   }
 
   function saveQuote() {
-    if (!currentCustomerId) {
-      alert("בחר לקוח לפני שמירה");
+    if (!state.current.customerName.trim()) {
+      alert("אנא הזן/י שם לקוח");
       return;
     }
-    const q: Quote = {
-      id: crypto.randomUUID(),
-      customerId: currentCustomerId,
-      title: quoteTitle || "הצעת מחיר",
+    const customer = ensureCustomerByName(
+      state.current.customerName,
+      state.current.customerPhone,
+      state.current.customerEmail,
+      state.current.customerNotes
+    );
+    const quote: Quote = {
+      id: uuid(),
+      customerId: customer.id,
+      title: state.current.title || "הצעת מחיר",
       date: Date.now(),
-      items: data.items,
-      taxPercent: data.taxPercent,
-      totals,
+      items: state.current.items,
+      taxPercent: parseLooseNumber(state.current.taxPercentText ?? "17"),
+      totals: { sub: subTotal, tax: taxValue, grand: grandTotal },
     };
-    setData((v: any) => ({ ...v, quotes: [...v.quotes, q] }));
-    alert("ההצעה נשמרה ללקוח");
+    setState((s) => ({ ...s, quotes: [...s.quotes, quote] }));
+    alert("הצעה נשמרה בהצלחה");
   }
 
-  // ---------- בדיקות (Test Cases) ----------
-  useEffect(function(){
+  function openLastQuoteForCustomer(customerId: string) {
+    const q = [...state.quotes].filter((x) => x.customerId === customerId).sort((a, b) => b.date - a.date)[0];
+    const customer = state.customers.find((c) => c.id === customerId);
+    if (!q || !customer) return;
+    setState((s) => ({
+      ...s,
+      ui: { ...s.ui, tab: "quote" },
+      current: {
+        ...s.current,
+        customerName: customer.name,
+        customerPhone: customer.phone ?? "",
+        customerEmail: customer.email ?? "",
+        customerNotes: customer.notes ?? "",
+        items: q.items.map((it) => ({ ...it, id: uuid() })), // clone
+        title: q.title,
+        taxPercentText: String(q.taxPercent ?? "17"),
+        notes: s.current.notes,
+      },
+    }));
+    setItemEditor(initItemEditor());
+  }
+
+  function deleteCustomer(customerId: string) {
+    if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
+    setState((s) => ({
+      ...s,
+      customers: s.customers.filter((c) => c.id !== customerId),
+      quotes: s.quotes.filter((q) => q.customerId !== customerId),
+    }));
+  }
+
+  /** ======= PDF Export (dynamic imports; safe even if deps missing) ======= */
+  async function generateAndExportPDF() {
+    let jsPDFMod: any, autoTableMod: any;
     try {
-      const testArea = (100/100) * (200/100);
-      console.assert(Math.abs(testArea - 2) < 1e-6, "Area test failed (cm→m²)");
-
-      const computed = ((2*10) + 300) * 3;
-      console.assert(Math.abs(computed - 960) < 1e-6, "Addons subtotal test failed");
-
-      const taxSample = 0.18 * 960;
-      console.assert(Math.abs(taxSample - 172.8) < 1e-6, "Tax 18% test failed (addons)");
-
-      const area2 = (150/100) * (80/100);
-      console.assert(Math.abs(area2 - 1.2) < 1e-6, "Area 150x80 cm test failed");
-      const subtotal2 = area2 * 100;
-      console.assert(Math.abs(subtotal2 - 120) < 1e-6, "Subtotal without addons failed");
-
-      // NEW: table column consistency test used by exportPDF
-      const colHeaders = ["#","מידות","מיקום","פרטים","מחיר ליח׳","כמות","סה\"כ"];
-      const sampleRow = ["1","100-200 ס\"מ","סלון","פרטים", "₪100","1","₪100"]; 
-      console.assert(colHeaders.length === sampleRow.length, "PDF table columns mismatch");
+      jsPDFMod = await import("jspdf");
+      autoTableMod = await import("jspdf-autotable");
     } catch (e) {
-      console.warn("Self tests encountered an issue", e);
+      alert("חסרות חבילות PDF. התקן/י: npm i jspdf jspdf-autotable");
+      return;
     }
-  }, []);
+    const jsPDF = jsPDFMod.default || jsPDFMod;
+    const autoTable = (autoTableMod.default || autoTableMod) as any;
 
-  // ------------------------------------------------------
-  // ייצוא PDF – גרסה עמידה ל-jspdf-autotable (HEAD/BODY arrays only)
-  // נמנע מקריאה לשדות פנימיים כמו widths ע"י מתן head/body עקביים.
-  // ------------------------------------------------------
-  async function exportPDF() {
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    if (!state.current.customerName.trim()) {
+      alert("אנא הזן/י שם לקוח לפני יצוא PDF");
+      return;
+    }
+    if (state.current.items.length === 0) {
+      alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
+      return;
+    }
+
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+    (doc as any).setR2L?.(true);
+
     await ensureHebrewFont(doc);
-
-    try { (doc as any).setFont && doc.setFont("NotoSansHebrew"); } catch {}
-
-    const margin = 36;
-    const pageWidth = doc.internal.pageSize.getWidth();
-
-    doc.setFontSize(18);
-    doc.text(data.company.logoText || "ALU-QUOTES", pageWidth - margin, 36, { align: "right" });
-
-    // פרטי ספק בצד ימין
+    doc.setFont("NotoHebrew", "normal");
     doc.setFontSize(12);
-    const sellerLine1 = data.company.sellerName || "שם העסק";
-    const sellerLine2 = data.company.sellerDetails || "כתובת / טלפון / אימייל";
-    doc.text(sellerLine1, margin, 36);
-    doc.text(sellerLine2, margin, 54);
 
-    // כותרת הצעה
-    doc.setFontSize(16);
-    const title = quoteTitle || "הצעת מחיר";
-    doc.text(title, pageWidth - margin, 80, { align: "right" });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const marginX = 40;
+    let cursorY = 40;
 
-    // פרטי לקוח (אם יש)
-    if (currentCustomer) {
-      doc.setFontSize(12);
-      const line1 = `${currentCustomer.name}${currentCustomer.phone ? "  •  " + currentCustomer.phone : ""}`;
-      doc.text(line1, pageWidth - margin, 100, { align: "right" });
-      if (currentCustomer.email) doc.text(currentCustomer.email, pageWidth - margin, 116, { align: "right" });
+    const headerLines = [
+      "אלום סמעאן סאמי",
+      "ביצוע עבודות אלומיניום ותריס",
+      "פסוטה   ת.ד 528             טל/פקס : 9870933          נייד0526475531",
+      "ע.מ. מס' 023107659",
+    ];
+    doc.setFontSize(13);
+    headerLines.forEach((line) => {
+      doc.text(line, pageWidth / 2, cursorY);
+      cursorY += 18;
+    });
+    doc.setFontSize(12);
+    cursorY += 10;
+
+    const customerLine = [state.current.customerName, state.current.customerPhone].filter(Boolean).join(" • ");
+    const email = state.current.customerEmail?.trim();
+    doc.text(customerLine, pageWidth / 2, cursorY, { align: "center" });
+    cursorY += 16;
+    if (email) {
+      doc.text(email, pageWidth / 2, cursorY, { align: "center" });
+      cursorY += 16;
     }
 
-    // HEAD + BODY as arrays (most compatible across autotable versions)
-    const headers = [["#","מידות","מיקום","פרטים","מחיר ליח׳","כמות","סה\"כ"]];
+    doc.setDrawColor(180);
+    doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
+    cursorY += 10;
 
-    const rows = (data.items.length ? data.items : [{ placeholder: true }]).map((it: any, idx: number) => {
-      if ((it as any).placeholder) return ["-","-","-","-","-","-","-"];
-      const dims = `${fmt(it.wCm)}-${fmt(it.hCm)} ס\"מ`;
+    const bodyRows = state.current.items.map((it, idx) => {
+      const w = parseLooseNumber(it.widthCm);
+      const h = parseLooseNumber(it.heightCm);
+      const dims = `${fmtNumber.format(w)}×${fmtNumber.format(h)}`;
+      const addonsText = it.addons.filter(a => a.checked).map(a => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`).join(" • ");
+      const details = [it.details, addonsText].filter(Boolean).join(" — ");
+      const qty = Math.max(0, parseLooseNumber(it.qty));
+      const area = (w * h) / 10000;
+      const addonsSum = it.addons.reduce((s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+      const unitPriceNum = parseLooseNumber(it.unitPrice);
+      const perItemPrice = area * unitPriceNum + addonsSum;
+
       return [
         String(idx + 1),
         dims,
-        it.loc || "",
-        it.details || "",
-        ils(it.unitPrice),
-        fmt(it.qty),
-        ils(it.subtotal),
+        it.location || "",
+        details || "",
+        fmtCurrency.format(perItemPrice),
+        fmtNumber.format(qty),
+        fmtCurrency.format(perItemPrice * qty),
       ];
     });
 
-    const startY = currentCustomer ? 140 : 120;
-
-    autoTable(doc as any, {
-      startY,
-      head: headers,
-      body: rows,
-      styles: { fontSize: 10, halign: 'right', font: hebrewFontRegistered ? 'NotoSansHebrew' : undefined, cellPadding: 4 },
-      headStyles: { fillColor: [0, 0, 0], halign: 'center', textColor: [255,255,255], font: hebrewFontRegistered ? 'NotoSansHebrew' : undefined },
-      margin: { left: margin, right: margin },
-      theme: "striped",
-      didParseCell: (info: any) => {
-        if (info.section === 'body' || info.section === 'head') {
-          info.cell.styles.halign = 'right';
-        }
-      },
+    autoTable(doc, {
+      startY: cursorY,
+      styles: { font: "NotoHebrew", fontSize: 11, halign: "right" },
+      headStyles: { fillColor: [236, 248, 255], textColor: 20 },
+      head: [["מס׳", "מידות (ס״מ)", "מיקום", "פרטים", "מחיר ליח׳", "כמות", "סה״כ"]],
+      body: bodyRows,
+      margin: { left: marginX, right: marginX },
+      tableLineColor: 230,
+      tableLineWidth: 0.5,
     });
 
-    const finalY = (doc as any).lastAutoTable?.finalY ?? startY;
-    let y = finalY + 16;
+    const tableY = (doc as any).lastAutoTable?.finalY ?? cursorY + 20;
 
-    // סיכומים בתחתית
-    doc.setFontSize(12);
-    doc.text(`מחיר: ${ils(totals.sub)}`, pageWidth - margin, y, { align: "right" }); y += 18;
-    doc.text(`מע"מ: ${ils(totals.tax)}`, pageWidth - margin, y, { align: "right" }); y += 18;
-    doc.text(`מחיר +מע"מ: ${ils(totals.grand)}`, pageWidth - margin, y, { align: "right" });
+    const boxWidth = 240;
+    const boxX = pageWidth - marginX - boxWidth;
+    let boxY = tableY + 18;
 
-    y += 24;
-    const dateStr = new Date().toLocaleDateString("he-IL");
-    doc.text(`תאריך: ${dateStr}`, pageWidth - margin, y, { align: "right" }); y += 18;
-    if (data.notes) {
-      const lines = (doc as any).splitTextToSize ? (doc as any).splitTextToSize(data.notes, pageWidth - margin*2) : data.notes;
-      if (Array.isArray(lines)) {
-        doc.text(lines as any, pageWidth - margin, y, { align: "right" });
-        y += 14 * lines.length;
-      } else {
-        doc.text(String(lines), pageWidth - margin, y, { align: "right" });
-        y += 14;
-      }
+    const sub = state.current.items.reduce((a, it) => a + it.subtotal, 0);
+    const taxDecimalNow = normalizeTaxPercent(parseLooseNumber(state.current.taxPercentText ?? "17"));
+    const vat = sub * taxDecimalNow;
+    const grand = sub + vat;
+
+    doc.setDrawColor(180);
+    doc.roundedRect(boxX, boxY, boxWidth, 92, 6, 6);
+    boxY += 22;
+    doc.text(`מחיר: ${fmtCurrency.format(sub)}`, boxX + boxWidth - 12, boxY, { align: "right" });
+    boxY += 22;
+    doc.text(`מע״מ: ${fmtCurrency.format(vat)}`, boxX + boxWidth - 12, boxY, { align: "right" });
+    boxY += 24;
+    doc.setFillColor(236, 248, 255);
+    doc.roundedRect(boxX + 8, boxY - 18, boxWidth - 16, 28, 5, 5, "F");
+    doc.setTextColor(0);
+    doc.setFont(undefined, "bold");
+    doc.text(`סה״כ לתשלום: ${fmtCurrency.format(grand)}`, boxX + boxWidth - 16, boxY, { align: "right" });
+    doc.setFont(undefined, "normal");
+
+    let footerY = Math.max(boxY + 28, tableY + 120);
+    footerY += 12;
+    doc.text(`תאריך: ${fmtDate.format(new Date())}`, pageWidth - marginX, footerY, { align: "right" });
+    footerY += 18;
+
+    if (state.current.notes?.trim()) {
+      const lines = doc.splitTextToSize(`הערות: ${state.current.notes.trim()}`, pageWidth - marginX * 2);
+      doc.text(lines, pageWidth - marginX, footerY, { align: "right" });
+      footerY += lines.length * 14 + 10;
     }
-    y += 10;
-    doc.text("חתימה:", pageWidth - margin, y, { align: "right" });
 
-    doc.save(`${title}.pdf`);
+    doc.text("חתימה:", pageWidth - marginX, footerY, { align: "right" });
+    try {
+      const sigResp = await fetch("/signature.png");
+      if (sigResp.ok) {
+        const blob = await sigResp.blob();
+        const dataUrl = await blobToDataUrl(blob);
+        doc.addImage(dataUrl, "PNG", pageWidth - marginX - 160, footerY - 18, 140, 48);
+      }
+    } catch {}
+
+    const filename = `${state.current.title || "הצעת מחיר"}.pdf`;
+    await androidSafeSave(doc, filename);
   }
 
-  // ------------------------------------------------------
-  // UI
-  // ------------------------------------------------------
-  return (
-    <div dir="rtl" className="min-h-screen w-full bg-gradient-to-b from-indigo-50 via-white to-sky-50 p-3 md:p-6">
-      <div className="mx-auto max-w-6xl grid gap-4">
-        <header className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 w-full md:w-auto">
-            <Button variant={view==='quote'? 'default': 'outline'} onClick={()=>setView('quote')} className={view==='quote'? 'bg-indigo-600 text-white' : ''}>
-              <FilePlus2 className="ml-2 h-4 w-4"/> הצעה
-            </Button>
-            <Button variant={view==='customers'? 'default': 'outline'} onClick={()=>setView('customers')} className={view==='customers'? 'bg-indigo-600 text-white' : ''}>
-              <Users className="ml-2 h-4 w-4"/> לקוחות
-            </Button>
-          </div>
+  async function ensureHebrewFont(doc: any) {
+    try {
+      const fontResp = await fetch("/fonts/NotoSansHebrew-Regular.ttf");
+      if (!fontResp.ok) throw new Error("font missing");
+      const buf = await fontResp.arrayBuffer();
+      const base64 = arrayBufferToBase64(buf);
+      doc.addFileToVFS("NotoSansHebrew-Regular.ttf", base64);
+      doc.addFont("NotoSansHebrew-Regular.ttf", "NotoHebrew", "normal");
+    } catch (e) {
+      console.warn("Hebrew font not found at /fonts/NotoSansHebrew-Regular.ttf. Proceeding with default font.", e);
+    }
+  }
 
-          {view === 'quote' && (
-            <div className="flex gap-2 w-full md:w-auto justify-end">
-              <Button variant="outline" className="border-indigo-200 hover:bg-indigo-50" onClick={()=>setShowSettings(true)}>
-                <Settings className="ml-2 h-4 w-4"/> הגדרות
-              </Button>
-              <Button variant="outline" onClick={saveQuote}><Save className="ml-2 h-4 w-4"/> שמור הצעה</Button>
-              <Button className="bg-indigo-600 hover:bg-indigo-700 text-white" onClick={exportPDF}>
-                <Download className="ml-2 h-4 w-4"/> ייצוא ל‑PDF
-              </Button>
-            </div>
-          )}
+  function arrayBufferToBase64(buffer: ArrayBuffer) {
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result));
+      fr.onerror = rej;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  async function androidSafeSave(doc: any, filename: string) {
+    const blob = doc.output("blob");
+    const nav = navigator as any;
+
+    if (nav.share && nav.canShare) {
+      try {
+        const file = new File([blob], filename, { type: "application/pdf" });
+        if (nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: filename, text: "" });
+          return;
+        }
+      } catch {}
+    }
+
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 0);
+      return;
+    } catch {}
+
+    try {
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+    } catch {
+      doc.save(filename);
+    }
+  }
+
+  /** ======= Settings dialog: profiles CRUD ======= */
+  const [profileDraft, setProfileDraft] = useState<{ id?: string; name: string; unitPrice: string }>({ name: "", unitPrice: "" });
+
+  function openSettings() {
+    setState((s) => ({ ...s, ui: { ...s.ui, settingsOpen: true } }));
+  }
+  function closeSettings() {
+    setState((s) => ({ ...s, ui: { ...s.ui, settingsOpen: false } }));
+    setProfileDraft({ name: "", unitPrice: "" });
+  }
+  function addProfile() {
+    const name = profileDraft.name.trim() || `פרופיל חדש`;
+    const unitPrice = parseLooseNumber(profileDraft.unitPrice) || 0;
+    setState((s) => ({
+      ...s,
+      profiles: [...s.profiles, { id: uuid(), name, unitPrice }],
+    }));
+    setProfileDraft({ name: "", unitPrice: "" });
+  }
+  function editProfile(p: Profile) {
+    setProfileDraft({ id: p.id, name: p.name, unitPrice: String(p.unitPrice) });
+  }
+  function saveProfileEdit() {
+    if (!profileDraft.id) return;
+    setState((s) => ({
+      ...s,
+      profiles: s.profiles.map((p) =>
+        p.id === profileDraft.id ? { ...p, name: profileDraft.name.trim() || p.name, unitPrice: parseLooseNumber(profileDraft.unitPrice) } : p
+      ),
+    }));
+    setProfileDraft({ name: "", unitPrice: "" });
+  }
+  function deleteProfile(id: string) {
+    setState((s) => ({
+      ...s,
+      profiles: s.profiles.filter((p) => p.id !== id),
+    }));
+    if (activeProfileId === id) setActiveProfileId(undefined);
+  }
+
+  /** ======= UI ========= */
+  return (
+    <div className="container-app">
+      <main className="w-full max-w-[1160px] flex flex-col gap-4">
+        {/* Top Bar */}
+        <header className="flex items-center justify-between gap-3 px-2">
+          <div className="flex items-center gap-2">
+            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">א</div>
+            <h1 className="text-xl sm:text-2xl font-semibold">הצעת מחיר — אלום סמעאן</h1>
+          </div>
+          <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
+            <button
+              className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "quote" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
+              onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "quote" } }))}
+            >
+              הצעה
+            </button>
+            <button
+              className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "customers" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
+              onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))}
+            >
+              לקוחות
+            </button>
+          </nav>
         </header>
 
-        {view === 'quote' ? (
-          <>
-            <Card className="shadow-sm border-indigo-100 bg-white/90 backdrop-blur">
-              <CardHeader>
-                <CardTitle className="text-right">פרטי ההצעה</CardTitle>
-              </CardHeader>
-              <CardContent className="grid md:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <Label>כותרת ההצעה</Label>
-                  <Input inputMode="text" value={quoteTitle} onChange={(e)=>setQuoteTitle(e.target.value)} placeholder="לדוגמה: הצעת מחיר לפרויקט X"/>
-                </div>
+        {/* Quote tab */}
+        {state.ui.tab === "quote" ? (
+          <section className="grid gap-4 px-2">
+            {/* Customer inline form */}
+            <section className="card p-4">
+              <h2 className="text-lg font-semibold mb-3">פרטי לקוח</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <LabeledInput
+                  label="שם לקוח*"
+                  placeholder="חובה"
+                  value={state.current.customerName}
+                  onChange={(v) => updateCurrent("customerName", v)}
+                />
+                <LabeledInput
+                  label="טלפון"
+                  placeholder="אופציונלי"
+                  value={state.current.customerPhone}
+                  onChange={(v) => updateCurrent("customerPhone", v)}
+                  inputMode="tel"
+                />
+                <LabeledInput
+                  label="אימייל"
+                  placeholder="אופציונלי"
+                  value={state.current.customerEmail}
+                  onChange={(v) => updateCurrent("customerEmail", v)}
+                  inputMode="email"
+                />
+                <LabeledInput
+                  label="הערות ללקוח (לא חובה)"
+                  placeholder=""
+                  value={state.current.customerNotes}
+                  onChange={(v) => updateCurrent("customerNotes", v)}
+                />
+              </div>
+            </section>
 
-                <div className="space-y-2">
-                  <Label>לקוח</Label>
-                  <div className="flex gap-2">
-                    <Select value={currentCustomerId} onValueChange={setCurrentCustomerId}>
-                      <SelectTrigger className="w-full"><SelectValue placeholder="בחר לקוח"/></SelectTrigger>
-                      <SelectContent>
-                        {data.customers.map((c)=> (
-                          <SelectItem value={c.id} key={c.id}>{c.name}{c.phone? ` – ${c.phone}`: ''}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button type="button" variant="outline" onClick={()=>addCustomer()} title="לקוח חדש"><UserPlus className="h-4 w-4"/></Button>
-                  </div>
-                </div>
+            {/* Calculator + Add item */}
+            <section className="card p-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <h2 className="text-lg font-semibold">מחשבון פריט</h2>
+                <div className="text-sm text-slate-600">גובה העמוד מתאים לנייד (100vh אמיתי)</div>
+              </div>
 
-                <div className="space-y-2 md:col-span-1">
-                  <Label>פרטי כותרת (מופיע ב‑PDF)</Label>
-                  <div className="grid grid-cols-1 gap-2">
-                    <Input value={data.company.logoText} onChange={(e)=>setData(function(v: any){return {...v, company: {...v.company, logoText: e.target.value}};})} placeholder="טקסט לוגו"/>
-                    <Input value={data.company.sellerName} onChange={(e)=>setData(function(v: any){return {...v, company: {...v.company, sellerName: e.target.value}};})} placeholder="שם העסק"/>
-                    <Input value={data.company.sellerDetails} onChange={(e)=>setData(function(v: any){return {...v, company: {...v.company, sellerDetails: e.target.value}};})} placeholder="כתובת / טלפון / אימייל"/>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+              <div className="grid grid-cols-1 sm:grid-cols-6 gap-3 mt-3">
+                <LabeledInput
+                  label="רוחב (ס״מ)"
+                  value={itemEditor.widthCm}
+                  onChange={(v) => setItemEditor({ ...itemEditor, widthCm: v })}
+                  inputMode="numeric"
+                />
+                <LabeledInput
+                  label="גובה (ס״מ)"
+                  value={itemEditor.heightCm}
+                  onChange={(v) => setItemEditor({ ...itemEditor, heightCm: v })}
+                  inputMode="numeric"
+                />
+                <LabeledInput
+                  label="כמות"
+                  value={itemEditor.qty}
+                  onChange={(v) => setItemEditor({ ...itemEditor, qty: v })}
+                  inputMode="numeric"
+                />
 
-            <div className="grid md:grid-cols-2 gap-6">
-              <Card className="shadow-sm border-indigo-100 bg-white/90 backdrop-blur">
-                <CardHeader className="pb-2"><CardTitle className="text-right">מחשבון</CardTitle></CardHeader>
-                <CardContent className="grid gap-4">
-                  <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-                    <div className="space-y-2">
-                      <Label>רוחב (ס"מ)</Label>
-                      <Input inputMode="numeric" type="number" min="0" step="1" value={wCm} onChange={(e)=>setWCm(Number((e.target as HTMLInputElement).value))} />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>גובה (ס"מ)</Label>
-                      <Input inputMode="numeric" type="number" min="0" step="1" value={hCm} onChange={(e)=>setHCm(Number((e.target as HTMLInputElement).value))} />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>כמות</Label>
-                      <Input inputMode="numeric" type="number" min="1" step="1" value={qty} onChange={(e)=>setQty(Number((e.target as HTMLInputElement).value))} />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>סוג פרופיל</Label>
-                      <Select value={selectedProfileId} onValueChange={setSelectedProfileId}>
-                        <SelectTrigger><SelectValue placeholder="בחר פרופיל"/></SelectTrigger>
-                        <SelectContent>
-                          {data.profiles.map(function(p: any){ return (
-                            <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                          );})}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2 md:col-span-2">
-                      <Label>מיקום</Label>
-                      <Input inputMode="text" value={loc} onChange={(e)=>setLoc(e.target.value)} placeholder="לדוגמה: חדר מגורים" />
-                    </div>
-                  </div>
+                <LabeledSelect
+                  label="פרופיל"
+                  value={activeProfileId ?? ""}
+                  onChange={(id) => setActiveProfileId(id || undefined)}
+                  options={[{ label: "— בחר/י —", value: "" }, ...state.profiles.map((p) => ({ label: p.name, value: p.id }))]}
+                />
+                <LabeledInput
+                  label="מחיר למ״ר"
+                  value={itemEditor.unitPrice}
+                  onChange={(v) => setItemEditor({ ...itemEditor, unitPrice: v })}
+                  inputMode="numeric"
+                />
+                <LabeledInput
+                  label="מיקום"
+                  value={itemEditor.location || ""}
+                  onChange={(v) => setItemEditor({ ...itemEditor, location: v })}
+                />
+              </div>
 
-                  <div className="grid md:grid-cols-3 gap-3">
-                    <div className="space-y-2 md:col-span-3">
-                      <Label>פרטים</Label>
-                      <Textarea rows={2} value={details} onChange={(e)=>setDetails(e.target.value)} placeholder="לפי מפרט וכתב כמויות / פירוט נוסף..." />
-                    </div>
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                <LabeledInput
+                  label="פרטים"
+                  value={itemEditor.details || ""}
+                  onChange={(v) => setItemEditor({ ...itemEditor, details: v })}
+                />
 
-                  {/* תוספות */}
-                  <div className="space-y-2">
-                    <Label>תוספות</Label>
-                    <div className="grid gap-2">
-                      {addonStates.map(function(a: any, idx: number){ return (
-                        <div key={a.id} className="flex items-center gap-3">
+                <div>
+                  <div className="text-sm font-medium mb-2">תוספות (מחיר ליח׳)</div>
+                  <div className="flex flex-wrap gap-2">
+                    {itemEditor.addons.map((a, idx) => (
+                      <div key={a.id} className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1">
+                        <label className="flex items-center gap-1">
                           <input
-                            id={`addon-${a.id}`}
                             type="checkbox"
-                            checked={!!a.checked}
-                            onChange={function(e){
-                              const checked = (e.target as HTMLInputElement).checked;
-                              setAddonStates(function(prev: any[]){
-                                const next = prev.slice(); next[idx] = { ...prev[idx], checked }; return next;
-                              });
+                            checked={a.checked}
+                            onChange={(e) => {
+                              const next = [...itemEditor.addons];
+                              next[idx] = { ...a, checked: e.target.checked };
+                              setItemEditor({ ...itemEditor, addons: next });
                             }}
                           />
-                          <label htmlFor={`addon-${a.id}`} className="min-w-40 text-sm">{a.name}</label>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-slate-600">₪</span>
-                            <Input className="w-28" inputMode="decimal" type="number" step="1" value={a.price}
-                                   onChange={function(e){
-                                     const val = (e.target as HTMLInputElement).value;
-                                     setAddonStates(function(prev: any[]){
-                                       const next = prev.slice(); next[idx] = { ...prev[idx], price: Number(val) }; return next;
-                                     });
-                                   }} />
-                          </div>
-                        </div>
-                      );})}
-                    </div>
-                    <div className="text-xs text-slate-500">סכום תוספות נבחרות: {ils(addonsTotal)} (יכפול בכמות).</div>
+                          <span className="text-sm">{a.name}</span>
+                        </label>
+                        <input
+                          className="w-20 rounded-md bg-slate-50 border border-slate-200 px-2 py-1 text-sm"
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="₪"
+                          value={a.price}
+                          onChange={(e) => {
+                            const next = [...itemEditor.addons];
+                            next[idx] = { ...a, price: e.target.value };
+                            setItemEditor({ ...itemEditor, addons: next });
+                          }}
+                        />
+                      </div>
+                    ))}
                   </div>
+                </div>
+              </div>
 
-                  <div className="grid md:grid-cols-3 gap-3 items-end">
-                    <div className="space-y-1">
-                      <Label>שיטת תמחור</Label>
-                      <div className="text-sm text-slate-600">למ״ר (רוחב×גובה)</div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>מחיר ליחידה (למ״ר)</Label>
-                      <Input inputMode="decimal" type="number" step="0.01" placeholder={String(selectedProfile ? selectedProfile.price : 0)} value={customUnitPrice}
-                             onChange={(e)=>setCustomUnitPrice((e.target as HTMLInputElement).value)} />
-                      <div className="text-xs text-slate-500">השאר ריק כדי להשתמש במחיר ברירת המחדל של הפרופיל.</div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="invisible md:visible">הוספה</Label>
-                      <Button className="w-full bg-sky-600 hover:bg-sky-700 text-white" onClick={addLineItem}><Plus className="ml-2 h-4 w-4"/> הוסף להצעה</Button>
-                    </div>
-                  </div>
+              {/* Stats row */}
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2 text-sm">
+                <Stat label="שטח (מ״ר)" value={fmtNumber.format(liveArea)} />
+                <Stat label="תוס׳ ליח׳" value={fmtCurrency.format(liveAddonsSumPerItem)} />
+                <Stat label="מחיר ליח׳" value={fmtCurrency.format(livePerItemPrice)} />
+                <Stat label="כמות" value={fmtNumber.format(liveQty)} />
+                <Stat label="סה״כ לפריט" value={fmtCurrency.format(liveLineSubtotal)} highlight />
+              </div>
 
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <Stat label="שטח (מ״ר)" value={fmt(areaM2)} />
-                    <Stat label="תוספות (פר פריט)" value={ils(addonsTotal)} />
-                    <Stat label="נמדד לתמחור" value={`${fmt(measured)} מ״ר`} />
-                    <Stat label="סכום שורה" value={`${ils(lineSubtotal)}`} />
-                  </div>
-                </CardContent>
-              </Card>
+              {/* Buttons (wrap on phones) */}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
+                  onClick={() => addItem(itemEditor)}
+                >
+                  הוסף להצעה
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={clearCurrentForm}>
+                  ניקוי
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={newQuote}>
+                  הצעה חדשה
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={openSettings}>
+                  הגדרות
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95" onClick={saveQuote}>
+                  שמור הצעה
+                </button>
+                <button className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:opacity-95" onClick={generateAndExportPDF}>
+                  ייצוא ל-PDF
+                </button>
+              </div>
+            </section>
 
-              <Card className="shadow-sm border-indigo-100 bg-white/90 backdrop-blur">
-                <CardHeader className="pb-2"><CardTitle className="text-right">פריטי הצעה</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  {data.items.length === 0 ? (
-                    <div className="text-slate-500 text-sm text-right">אין פריטים עדיין. הוסף מהמחשבון.</div>
-                  ) : (
-                    <div className="overflow-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b">
-                            <th className="py-2 pl-2 text-right">#</th>
-                            <th className="py-2 pl-2 text-right">מידות (ס"מ)</th>
-                            <th className="py-2 pl-2 text-right">מיקום</th>
-                            <th className="py-2 pl-2 text-right">פרטים</th>
-                            <th className="py-2 pl-2 text-right">כמות</th>
-                            <th className="py-2 pl-2 text-right">מחיר ליח׳</th>
-                            <th className="py-2 pl-2 text-right">סה״כ</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {data.items.map(function(it: any, i: number){ return (
-                            <tr key={it.id} className="border-b last:border-b-0">
-                              <td className="py-2 pl-2 text-right">{i + 1}</td>
-                              <td className="py-2 pl-2 text-right">{fmt(it.wCm)}-{fmt(it.hCm)} ס"מ</td>
-                              <td className="py-2 pl-2 text-right">{it.loc}</td>
-                              <td className="py-2 pl-2 text-right">{it.details}</td>
-                              <td className="py-2 pl-2 text-right">{fmt(it.qty)}</td>
-                              <td className="py-2 pl-2 text-right">{ils(it.unitPrice)}</td>
-                              <td className="py-2 pl-2 text-right">{ils(it.subtotal)}</td>
-                              <td className="py-2 pl-2">
-                                <Button size="icon" variant="ghost" onClick={()=>removeItem(it.id)} title="מחיקה">
-                                  <Trash2 className="h-4 w-4"/>
-                                </Button>
-                              </td>
-                            </tr>
-                          );})}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Label>מע"מ</Label>
-                      <Input className="w-28" inputMode="decimal" type="number" step="0.01" value={data.taxPercent}
-                             onChange={(e)=>setData(function(v: any){return {...v, taxPercent: Number((e.target as HTMLInputElement).value)};})} />
-                      <div className="text-xs text-slate-500">אפשר להקליד <b>0.18</b> או <b>18</b>.</div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" onClick={resetItems}><Trash2 className="ml-2 h-4 w-4"/> ניקוי</Button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    <Stat label="סיכום ביניים" value={ils(totals.sub)} />
-                    <Stat label={`מע"מ (${fmt(taxRate * 100)}%)`} value={ils(totals.tax)} />
-                    <Stat label={'סה"כ לתשלום'} value={ils(totals.grand)} emphasize />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>הערות (מופיע ב‑PDF)</Label>
-                    <Textarea rows={3} placeholder="תנאי תשלום, זמן אספקה, תוקף ההצעה..." value={data.notes} onChange={(e)=>setData(function(v: any){return {...v, notes: (e.target as HTMLTextAreaElement).value};})} />
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </>
-        ) : (
-          <CustomersView
-            customers={data.customers}
-            quotes={data.quotes}
-            onAdd={() => addCustomer({ name: "לקוח חדש" })}
-            onUpdate={updateCustomer}
-            onDelete={deleteCustomer}
-          />
-        )}
-      </div>
-
-      {/* דיאלוג הגדרות */}
-      <Dialog open={showSettings} onOpenChange={setShowSettings}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>פרופילים ומחירים</DialogTitle>
-          </DialogHeader>
-          <Tabs defaultValue="manage">
-            <TabsList>
-              <TabsTrigger value="manage">ניהול פרופילים</TabsTrigger>
-              <TabsTrigger value="new">פרופיל חדש</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="manage" className="space-y-4">
-              <div className="overflow-auto">
-                <table className="w-full text-sm">
+            {/* Items Table */}
+            <section className="card p-4">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <h2 className="text-lg font-semibold">פריטי ההצעה</h2>
+                <div className="text-sm text-slate-600">הטבלה נגללת אופקית במסכים קטנים</div>
+              </div>
+              <div className="table-scroll">
+                <table className="table-inner-min w-full text-sm">
                   <thead>
-                    <tr className="border-b">
-                      <th className="py-2 pl-2 text-right">שם</th>
-                      <th className="py-2 pl-2 text-right">בסיס</th>
-                      <th className="py-2 pl-2 text-right">מחיר ליח׳</th>
-                      <th className="py-2 pl-2 text-right">פעולות</th>
+                    <tr className="border-b bg-slate-50">
+                      <Th>מס׳</Th>
+                      <Th>מידות (ס״מ)</Th>
+                      <Th>מיקום</Th>
+                      <Th>פרטים</Th>
+                      <Th>מחיר ליח׳</Th>
+                      <Th>כמות</Th>
+                      <Th>סה״כ</Th>
+                      <Th></Th>
                     </tr>
                   </thead>
                   <tbody>
-                    {data.profiles.map(function(p: any){ return (
-                      <tr key={p.id} className="border-b last:border-b-0">
-                        <td className="py-2 pl-2 text-right">{p.name}</td>
-                        <td className="py-2 pl-2 text-right">למ״ר</td>
-                        <td className="py-2 pl-2 text-right">{ils(p.price)}</td>
-                        <td className="py-2 pl-2">
-                          <div className="flex gap-2 justify-end">
-                            <Button size="sm" variant="outline" onClick={()=>setEditingProfile(p)}><Edit3 className="ml-2 h-4 w-4"/> עריכה</Button>
-                            <Button size="sm" variant="destructive" onClick={()=>deleteProfile(p)}><Trash2 className="ml-2 h-4 w-4"/> מחיקה</Button>
-                          </div>
+                    {state.current.items.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="text-center py-6 text-slate-500">
+                          אין פריטים עדיין
                         </td>
                       </tr>
-                    );})}
+                    ) : (
+                      state.current.items.map((it, idx) => {
+                        const w = parseLooseNumber(it.widthCm);
+                        const h = parseLooseNumber(it.heightCm);
+                        const area = (w * h) / 10000;
+                        const addonsSum = it.addons.reduce((s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+                        const unit = parseLooseNumber(it.unitPrice);
+                        const perItem = area * unit + addonsSum;
+                        const qty = Math.max(0, parseLooseNumber(it.qty));
+                        const total = perItem * qty;
+
+                        const addonsText = it.addons.filter(a => a.checked).map(a => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`).join(" • ");
+
+                        return (
+                          <tr key={it.id} className="border-b">
+                            <Td>{idx + 1}</Td>
+                            <Td>{`${fmtNumber.format(w)}×${fmtNumber.format(h)}`}</Td>
+                            <Td>{it.location || ""}</Td>
+                            <Td>{[it.details, addonsText].filter(Boolean).join(" — ")}</Td>
+                            <Td>{fmtCurrency.format(perItem)}</Td>
+                            <Td>{fmtNumber.format(qty)}</Td>
+                            <Td className="font-medium">{fmtCurrency.format(total)}</Td>
+                            <Td>
+                              <button
+                                className="text-red-600 hover:underline"
+                                onClick={() => removeItem(it.id)}
+                                aria-label="מחק פריט"
+                              >
+                                מחיקה
+                              </button>
+                            </Td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
-            </TabsContent>
 
-            <TabsContent value="new">
-              <ProfileEditor onCancel={function(){}} onSave={function(p: any){ upsertProfile({ ...p, id: (crypto && (crypto as any).randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random())) }); setEditingProfile(null); setShowSettings(true); }} />
-            </TabsContent>
-          </Tabs>
-
-          {editingProfile && (
-            <div className="border rounded-xl p-4 bg-slate-50">
-              <div className="flex items-center justify-between">
-                <h4 className="font-medium">עריכת פרופיל</h4>
-                <Button variant="ghost" size="icon" onClick={()=>setEditingProfile(null)}><X className="h-4 w-4"/></Button>
+              {/* Totals row */}
+              <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm">מע״מ (% או עשרוני):</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
+                    value={state.current.taxPercentText}
+                    onChange={(e) => updateCurrent("taxPercentText", e.target.value)}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-3 text-sm">
+                  <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
+                  <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
+                  <Stat label="סה״כ לתשלום" value={fmtCurrency.format(grandTotal)} highlight />
+                </div>
               </div>
-              <ProfileEditor
-                initial={editingProfile}
-                onCancel={function(){ setEditingProfile(null); }}
-                onSave={function(p: any){ upsertProfile(p); setEditingProfile(null); }}
-              />
+
+              {/* Footer notes */}
+              <div className="mt-4">
+                <LabeledInput
+                  label="הערות למסמך (יופיעו ב-PDF)"
+                  value={state.current.notes}
+                  onChange={(v) => updateCurrent("notes", v)}
+                />
+              </div>
+            </section>
+          </section>
+        ) : (
+          <CustomersPage
+            customers={state.customers}
+            quotes={state.quotes}
+            onOpenLast={openLastQuoteForCustomer}
+            onNewFor={(c) => {
+              setState((s) => ({
+                ...s,
+                ui: { ...s.ui, tab: "quote" },
+                current: {
+                  ...s.current,
+                  customerName: c.name,
+                  customerPhone: c.phone ?? "",
+                  customerEmail: c.email ?? "",
+                  customerNotes: c.notes ?? "",
+                  items: [],
+                },
+              }));
+              setItemEditor(initItemEditor());
+            }}
+            onEditCustomer={(c) => {
+              const name = prompt("שם לקוח", c.name) ?? c.name;
+              const phone = prompt("טלפון", c.phone ?? "") ?? c.phone ?? "";
+              const email = prompt("אימייל", c.email ?? "") ?? c.email ?? "";
+              const notes = prompt("הערות", c.notes ?? "") ?? c.notes ?? "";
+              setState((s) => ({
+                ...s,
+                customers: s.customers.map((x) => (x.id === c.id ? { ...x, name, phone, email, notes } : x)),
+              }));
+            }}
+            onDeleteCustomer={(c) => deleteCustomer(c.id)}
+          />
+        )}
+
+        {/* Settings Dialog */}
+        {state.ui.settingsOpen && (
+          <Modal onClose={closeSettings} title="הגדרות — ניהול פרופילים">
+            <div className="modal-body p-4 space-y-4">
+              <div className="text-sm text-slate-600">
+                הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר. הדיאלוג מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <LabeledInput
+                  label="שם פרופיל"
+                  value={profileDraft.name}
+                  onChange={(v) => setProfileDraft({ ...profileDraft, name: v })}
+                />
+                <LabeledInput
+                  label="מחיר למ״ר"
+                  value={profileDraft.unitPrice}
+                  onChange={(v) => setProfileDraft({ ...profileDraft, unitPrice: v })}
+                  inputMode="numeric"
+                />
+                <div className="flex items-end gap-2">
+                  {profileDraft.id ? (
+                    <button className="px-3 py-2 rounded-lg bg-sky-500 text-white" onClick={saveProfileEdit}>
+                      שמירת עריכה
+                    </button>
+                  ) : (
+                    <button className="px-3 py-2 rounded-lg bg-sky-500 text-white" onClick={addProfile}>
+                      הוספת פרופיל
+                    </button>
+                  )}
+                  <button className="px-3 py-2 rounded-lg bg-white border" onClick={() => setProfileDraft({ name: "", unitPrice: "" })}>
+                    ניקוי
+                  </button>
+                </div>
+              </div>
+
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <Th>שם</Th>
+                      <Th>מחיר למ״ר</Th>
+                      <Th>פעולות</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {state.profiles.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="py-6 text-center text-slate-500">
+                          אין פרופילים
+                        </td>
+                      </tr>
+                    ) : (
+                      state.profiles.map((p) => (
+                        <tr key={p.id} className="border-t">
+                          <Td>{p.name}</Td>
+                          <Td>{fmtCurrency.format(p.unitPrice)}</Td>
+                          <Td>
+                            <div className="flex flex-wrap gap-2">
+                              <button className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50" onClick={() => editProfile(p)}>
+                                עריכה
+                              </button>
+                              <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => deleteProfile(p.id)}>
+                                מחיקה
+                              </button>
+                            </div>
+                          </Td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" onClick={()=>setShowSettings(false)}>סגירה</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <div className="p-3 border-t flex flex-wrap gap-2">
+              <button className="px-4 py-2 rounded-lg bg-slate-800 text-white" onClick={closeSettings}>
+                סגירה
+              </button>
+            </div>
+          </Modal>
+        )}
+      </main>
     </div>
   );
 }
 
-function Stat({ label, value, emphasize=false }: {label: string; value: React.ReactNode; emphasize?: boolean;}) {
+/** ======= Small UI bits (inline) ======= */
+function LabeledInput(props: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
+}) {
   return (
-    <div className={`rounded-2xl border p-4 ${emphasize ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white'} `}>
-      <div className="text-xs opacity-70 text-right">{label}</div>
-      <div className="text-xl font-semibold text-right">{value}</div>
-    </div>
+    <label className="grid gap-1.5">
+      <span className="text-sm text-slate-700">{props.label}</span>
+      <input
+        type="text"
+        inputMode={props.inputMode}
+        className="rounded-md bg-white border border-slate-300 px-3 py-2"
+        placeholder={props.placeholder}
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+      />
+    </label>
   );
 }
 
-function ProfileEditor({ initial, onSave, onCancel }: {initial?: any; onSave: (p: any)=>void; onCancel: ()=>void;}) {
-  const [name, setName] = useState((initial && initial.name) || "");
-  const [price, setPrice] = useState((initial && typeof initial.price !== 'undefined') ? initial.price : 0);
-
-  function handleSave() {
-    const payload = {
-      id: (initial && initial.id) ? initial.id : (crypto && (crypto as any).randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random())),
-      name: name || 'פרופיל שטח חדש',
-      basis: 'area',
-      unit: 'm2',
-      price: Number(price) || 0,
-    };
-    if (onSave) onSave(payload);
-  }
+function LabeledSelect(props: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: { label: string; value: string }[];
+}) {
   return (
-    <div className="grid md:grid-cols-4 gap-3">
-      <div className="space-y-2 md:col-span-3">
-        <Label>שם הפרופיל</Label>
-        <Input value={name} onChange={(e)=>setName((e.target as HTMLInputElement).value)} placeholder="לדוגמה: פרופיל הזזה 45"/>
-      </div>
-      <div className="space-y-2">
-        <Label>מחיר ליחידה (למ״ר)</Label>
-        <Input inputMode="decimal" type="number" step="0.01" value={price} onChange={(e)=>setPrice(Number((e.target as HTMLInputElement).value))} />
-      </div>
-      <div className="md:col-span-4 flex justify-end gap-2">
-        <Button variant="outline" onClick={onCancel}>ביטול</Button>
-        <Button onClick={handleSave}><Save className="ml-2 h-4 w-4"/> שמירה</Button>
-      </div>
+    <label className="grid gap-1.5">
+      <span className="text-sm text-slate-700">{props.label}</span>
+      <select
+        className="rounded-md bg-white border border-slate-300 px-3 py-2"
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+      >
+        {props.options.map((o) => (
+          <option key={o.value + o.label} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${highlight ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-sm font-medium">{value}</div>
     </div>
   );
 }
 
-// -----------------------------
-// Customers View
-// -----------------------------
-function CustomersView({ customers, quotes, onAdd, onUpdate, onDelete }: {
+function Th({ children }: { children: React.ReactNode }) {
+  return <th className="text-right px-3 py-2 text-slate-700 font-medium">{children}</th>;
+}
+function Td({ children }: { children: React.ReactNode }) {
+  return <td className="text-right px-3 py-2 align-top">{children}</td>;
+}
+
+/** Customers Page */
+function CustomersPage(props: {
   customers: Customer[];
   quotes: Quote[];
-  onAdd: ()=>void;
-  onUpdate: (c: Customer)=>void;
-  onDelete: (id: string)=>void;
+  onOpenLast: (customerId: string) => void;
+  onNewFor: (c: Customer) => void;
+  onEditCustomer: (c: Customer) => void;
+  onDeleteCustomer: (c: Customer) => void;
 }) {
-  const [editing, setEditing] = useState<Customer|null>(null);
+  const latestMap = useMemo(() => {
+    const grouped: Record<string, Quote[]> = {};
+    for (const q of props.quotes) (grouped[q.customerId] ||= []).push(q);
+    const latest: Record<string, Quote> = {};
+    for (const id in grouped) latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
+    return latest;
+  }, [props.quotes]);
 
-  function QuoteCount({ customerId }:{customerId:string}){
-    const qs = quotes.filter(q=>q.customerId===customerId);
-    const last = [...qs].sort((a,b)=>b.date-a.date)[0];
-    return (
-      <div className="text-right text-sm">
-        <div>מס׳ הצעות: {qs.length}</div>
-        {last && <div className="text-slate-500">אחרון: {new Date(last.date).toLocaleDateString('he-IL')} · {new Intl.NumberFormat('he-IL', {style:'currency', currency:'ILS'}).format(last.totals.grand)}</div>}
-      </div>
-    );
-  }
+  const countMap = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const q of props.quotes) m[q.customerId] = (m[q.customerId] || 0) + 1;
+    return m;
+  }, [props.quotes]);
 
   return (
-    <Card className="shadow-sm border-indigo-100 bg-white/90 backdrop-blur">
-      <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-right">לקוחות</CardTitle>
-        <Button onClick={onAdd}><UserPlus className="ml-2 h-4 w-4"/> לקוח חדש</Button>
-      </CardHeader>
-      <CardContent>
-        {/* Mobile cards */}
-        <div className="grid gap-3 md:hidden">
-          {customers.length===0 && <div className="text-slate-500 text-sm text-right">אין לקוחות עדיין.</div>}
-          {customers.map(c=> (
-            <div key={c.id} className="rounded-2xl border p-4 bg-white">
-              <div className="flex items-start justify-between gap-2">
-                <div className="text-right">
-                  <div className="text-base font-semibold">{c.name}</div>
-                  <div className="text-xs text-slate-600">{c.phone}</div>
-                  <div className="text-xs text-slate-600">{c.email}</div>
+    <section className="grid gap-4 px-2">
+      <div className="card p-4">
+        <h2 className="text-lg font-semibold mb-3">לקוחות</h2>
+
+        {/* Mobile: cards */}
+        <div className="grid sm:hidden grid-cols-1 gap-3">
+          {props.customers.length === 0 ? (
+            <div className="text-slate-500 text-sm">אין לקוחות עדיין</div>
+          ) : (
+            props.customers.map((c) => {
+              const last = latestMap[c.id];
+              const count = countMap[c.id] || 0;
+              return (
+                <div key={c.id} className="rounded-xl border p-3 bg-white">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="font-medium">{c.name}</div>
+                      <div className="text-xs text-slate-600">
+                        הצעות: {count} {last ? `• אחרונה: ${fmtDate.format(new Date(last.date))} • ${fmtCurrency.format(last.totals.grand)}` : ""}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                        פתח אחרונה
+                      </button>
+                      <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
+                        הצעה חדשה
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onEditCustomer(c)}>
+                      עריכה
+                    </button>
+                    <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
+                      מחיקה
+                    </button>
+                  </div>
                 </div>
-                <QuoteCount customerId={c.id}/>
-              </div>
-              {c.notes && <div className="text-xs text-slate-600 mt-2 text-right whitespace-pre-wrap">{c.notes}</div>}
-              <div className="flex justify-end gap-2 mt-3">
-                <Button size="sm" variant="outline" onClick={()=>setEditing(c)}>עריכה</Button>
-                <Button size="sm" variant="destructive" onClick={()=>onDelete(c.id)}>מחיקה</Button>
-              </div>
-            </div>
-          ))}
+              );
+            })
+          )}
         </div>
 
-        {/* Desktop table */}
-        <div className="hidden md:block overflow-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b">
-                <th className="py-2 pl-2 text-right">שם</th>
-                <th className="py-2 pl-2 text-right">טלפון</th>
-                <th className="py-2 pl-2 text-right">אימייל</th>
-                <th className="py-2 pl-2 text-right">הערות</th>
-                <th className="py-2 pl-2 text-right">הצעות</th>
-                <th className="py-2 pl-2 text-right">פעולות</th>
+        {/* Desktop: table */}
+        <div className="hidden sm:block table-scroll mt-2">
+          <table className="table-inner-min w-full text-sm">
+            <thead className="bg-slate-50">
+              <tr>
+                <Th>שם</Th>
+                <Th>טלפון</Th>
+                <Th>אימייל</Th>
+                <Th>מס׳ הצעות</Th>
+                <Th>הצעה אחרונה</Th>
+                <Th>סכום אחרון</Th>
+                <Th>פעולות</Th>
               </tr>
             </thead>
             <tbody>
-              {customers.map(c=> (
-                <tr key={c.id} className="border-b last:border-b-0">
-                  <td className="py-2 pl-2 text-right whitespace-nowrap">{c.name}</td>
-                  <td className="py-2 pl-2 text-right whitespace-nowrap">{c.phone}</td>
-                  <td className="py-2 pl-2 text-right whitespace-nowrap">{c.email}</td>
-                  <td className="py-2 pl-2 text-right max-w-[360px]">
-                    <div className="truncate" title={c.notes}>{c.notes}</div>
-                  </td>
-                  <td className="py-2 pl-2 text-right"><QuoteCount customerId={c.id}/></td>
-                  <td className="py-2 pl-2 text-right">
-                    <div className="flex justify-end gap-2">
-                      <Button size="sm" variant="outline" onClick={()=>setEditing(c)}>עריכה</Button>
-                      <Button size="sm" variant="destructive" onClick={()=>onDelete(c.id)}>מחיקה</Button>
-                    </div>
+              {props.customers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-6 text-center text-slate-500">
+                    אין לקוחות עדיין
                   </td>
                 </tr>
-              ))}
+              ) : (
+                props.customers.map((c) => {
+                  const last = latestMap[c.id];
+                  const count = countMap[c.id] || 0;
+                  return (
+                    <tr key={c.id} className="border-t">
+                      <Td>{c.name}</Td>
+                      <Td>{c.phone ?? ""}</Td>
+                      <Td>{c.email ?? ""}</Td>
+                      <Td>{count}</Td>
+                      <Td>{last ? fmtDate.format(new Date(last.date)) : ""}</Td>
+                      <Td>{last ? fmtCurrency.format(last.totals.grand) : ""}</Td>
+                      <Td>
+                        <div className="flex flex-wrap gap-2">
+                          <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                            פתח אחרונה
+                          </button>
+                          <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
+                            הצעה חדשה
+                          </button>
+                          <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onEditCustomer(c)}>
+                            עריכה
+                          </button>
+                          <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
+                            מחיקה
+                          </button>
+                        </div>
+                      </Td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
-      </CardContent>
-
-      <Dialog open={!!editing} onOpenChange={(o)=>!o && setEditing(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>עריכת לקוח</DialogTitle>
-          </DialogHeader>
-          {editing && (
-            <CustomerEditor
-              initial={editing}
-              onCancel={()=>setEditing(null)}
-              onSave={(c)=>{ onUpdate(c); setEditing(null); }}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
-    </Card>
+      </div>
+    </section>
   );
 }
 
-function CustomerEditor({ initial, onSave, onCancel }: { initial?: Customer; onSave: (c: Customer)=>void; onCancel: ()=>void; }){
-  const [name, setName] = useState(initial?.name || "");
-  const [phone, setPhone] = useState(initial?.phone || "");
-  const [email, setEmail] = useState(initial?.email || "");
-  const [notes, setNotes] = useState(initial?.notes || "");
-
-  function handleSave(){
-    const payload: Customer = {
-      id: initial?.id || crypto.randomUUID(),
-      name: name.trim() || "לקוח חדש",
-      phone: phone.trim(),
-      email: email.trim(),
-      notes: notes,
-      createdAt: initial?.createdAt || Date.now(),
-    };
-    onSave(payload);
-  }
+/** Modal (phone-safe constraints + internal scroll + wrapped buttons) */
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [onClose]);
 
   return (
-    <div className="grid gap-3">
-      <div className="grid md:grid-cols-2 gap-3">
-        <div className="space-y-2">
-          <Label>שם</Label>
-          <Input value={name} onChange={(e)=>setName((e.target as HTMLInputElement).value)} placeholder="שם הלקוח"/>
+    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="modal-panel card" onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b flex items-center justify-between">
+          <h3 className="text-base font-semibold">{title}</h3>
+          <button className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50" onClick={onClose} aria-label="סגירה">
+            ✕
+          </button>
         </div>
-        <div className="space-y-2">
-          <Label>טלפון</Label>
-          <Input value={phone} onChange={(e)=>setPhone((e.target as HTMLInputElement).value)} placeholder="050-0000000"/>
-        </div>
-        <div className="space-y-2">
-          <Label>אימייל</Label>
-          <Input value={email} onChange={(e)=>setEmail((e.target as HTMLInputElement).value)} placeholder="name@example.com"/>
-        </div>
-        <div className="space-y-2 md:col-span-2">
-          <Label>הערות</Label>
-          <Textarea rows={3} value={notes} onChange={(e)=>setNotes((e.target as HTMLTextAreaElement).value)} placeholder="הערות על הלקוח"/>
-        </div>
-      </div>
-      <div className="flex justify-end gap-2">
-        <Button variant="outline" onClick={onCancel}>ביטול</Button>
-        <Button onClick={handleSave}><Save className="ml-2 h-4 w-4"/> שמירה</Button>
+        {children}
       </div>
     </div>
   );

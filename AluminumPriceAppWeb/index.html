@@ -1,12 +1,43 @@
+
 <!doctype html>
-<html lang="en">
+<html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0ea5e9" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>aluminumpriceappweb</title>
+    <title>אלום סמעאן — הצעת מחיר</title>
+    <!--
+      ✅ Minimal setup notes (read once, then delete if you want):
+
+      1) Create with Vite (React+TS):
+         npm create vite@latest aluminum-quote-new -- --template react-ts
+         cd aluminum-quote-new
+
+      2) Install deps:
+         npm i jspdf jspdf-autotable
+         npm i -D tailwindcss@next postcss autoprefixer
+
+      3) Tailwind v4 single import style:
+         - Ensure your postcss.config.js has: module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } }
+         - No tailwind.config.js is required for basic usage.
+         - All Tailwind utilities used are standard.
+
+      4) Place assets:
+         public/fonts/NotoSansHebrew-Regular.ttf     (Hebrew font for PDF)
+         public/signature.png                         (optional signature image for PDF)
+
+      5) Run:
+         npm run dev
+      6) Build:
+         npm run build
+    -->
   </head>
-  <body>
+  <body class="min-h-screen bg-[radial-gradient(ellipse_at_top_right,rgba(14,165,233,.12),transparent_40%),radial-gradient(ellipse_at_bottom_left,rgba(99,102,241,.12),transparent_40%)] antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
