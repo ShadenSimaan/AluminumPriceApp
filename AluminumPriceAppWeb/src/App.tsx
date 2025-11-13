@@ -116,7 +116,7 @@ const defaultAddonsPreset: Addon[] = [
   { id: uuid(), name: "תריס גלילה", price: "0", checked: false },
 ];
 
-/** ===== Default state (used for migration/fallback) ===== */
+/** ===== Default state + hydrate (guards localStorage) ===== */
 const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
@@ -134,14 +134,11 @@ const DEFAULT_STATE: AppState = {
   ui: { tab: "quote", settingsOpen: false },
 };
 
-/** ===== Validate + migrate any LS object to the proper shape ===== */
 function hydrateState(): AppState {
   const raw = localStorage.getItem(LS_KEY);
   if (!raw) return structuredClone(DEFAULT_STATE);
-
   try {
     const parsed = JSON.parse(raw);
-    // Basic guards
     const obj: Partial<AppState> = typeof parsed === "object" && parsed ? parsed : {};
 
     const customers = Array.isArray(obj.customers) ? obj.customers : [];
@@ -164,13 +161,9 @@ function hydrateState(): AppState {
     const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
     const ui = { tab, settingsOpen: Boolean(uiRaw.settingsOpen ?? false) };
 
-    const safe: AppState = { customers, quotes, profiles, current, ui };
-    return safe;
-  } catch (e) {
-    // Backup the broken value once, then fall back to defaults
-    try {
-      localStorage.setItem(LS_KEY + ":backup", raw!);
-    } catch {}
+    return { customers, quotes, profiles, current, ui };
+  } catch {
+    try { localStorage.setItem(LS_KEY + ":backup", raw!); } catch {}
     return structuredClone(DEFAULT_STATE);
   }
 }
@@ -181,7 +174,7 @@ function hydrateState(): AppState {
 export default function App() {
   const [state, setState] = useState<AppState>(() => hydrateState());
 
-  // Persist on change
+  // Auto-save: persists on ANY change (already covers crashes)
   useEffect(() => {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
@@ -237,14 +230,20 @@ export default function App() {
     setState((s) => ({ ...s, current: { ...s.current, items: s.current.items.filter((it) => it.id !== id) } }));
   }
 
-  function clearCurrentForm() {
+  function clearItemEditor() {
     setItemEditor(initItemEditor());
   }
 
   function newQuote() {
     setState((s) => ({
       ...s,
-      current: { ...s.current, title: "הצעת מחיר", items: [], notes: "", taxPercentText: s.current.taxPercentText ?? "17" },
+      current: {
+        ...s.current,
+        title: "הצעת מחיר",
+        items: [],
+        notes: "",
+        taxPercentText: s.current.taxPercentText ?? "17",
+      },
     }));
     setItemEditor(initItemEditor());
     setActiveProfileId(s.profiles[0]?.id ?? undefined);
@@ -363,16 +362,34 @@ export default function App() {
     setItemEditor(initItemEditor());
   }
 
-  function deleteCustomer(customerId: string) {
-    if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
+  /** Export latest quote for a customer immediately (from לקוחות page) */
+  async function exportLastForCustomer(customerId: string) {
+    const q = [...state.quotes].filter((x) => x.customerId === customerId).sort((a, b) => b.date - a.date)[0];
+    const customer = state.customers.find((c) => c.id === customerId);
+    if (!q || !customer) {
+      alert("אין הצעה שמורה ללקוח זה");
+      return;
+    }
+    // Load into current, then call export
     setState((s) => ({
       ...s,
-      customers: s.customers.filter((c) => c.id !== customerId),
-      quotes: s.quotes.filter((q) => q.customerId !== customerId),
+      ui: { ...s.ui, tab: "quote" },
+      current: {
+        ...s.current,
+        customerName: customer.name,
+        customerPhone: customer.phone ?? "",
+        customerEmail: customer.email ?? "",
+        customerNotes: customer.notes ?? "",
+        items: q.items.map((it) => ({ ...it })), // keep as-is
+        title: q.title,
+        taxPercentText: String(q.taxPercent ?? "17"),
+        notes: s.current.notes,
+      },
     }));
+    setTimeout(() => generateAndExportPDF(), 0);
   }
 
-  /** ======= PDF Export (dynamic imports; safe even if deps missing) ======= */
+  /** ======= PDF Export (now prefers OPEN first, then download, then share) ======= */
   async function generateAndExportPDF() {
     let jsPDFMod: any, autoTableMod: any;
     try {
@@ -513,7 +530,7 @@ export default function App() {
     } catch {}
 
     const filename = `${state.current.title || "הצעת מחיר"}.pdf`;
-    await androidSafeSave(doc, filename);
+    await openFirstThenDownloadThenShare(doc, filename);
   }
 
   async function ensureHebrewFont(doc: any) {
@@ -546,22 +563,29 @@ export default function App() {
     });
   }
 
-  async function androidSafeSave(doc: any, filename: string) {
+  /** New order of operations for better phone + desktop behavior:
+   *  1) Try opening a blob URL in a NEW TAB (most reliable viewer)
+   *  2) If blocked, try a hidden <a download>
+   *  3) Lastly, try Web Share (if supported)
+   */
+  async function openFirstThenDownloadThenShare(doc: any, filename: string) {
     const blob = doc.output("blob");
-    const nav = navigator as any;
+    const url = URL.createObjectURL(blob);
 
-    if (nav.share && nav.canShare) {
-      try {
-        const file = new File([blob], filename, { type: "application/pdf" });
-        if (nav.canShare({ files: [file] })) {
-          await nav.share({ files: [file], title: filename, text: "" });
-          return;
-        }
-      } catch {}
+    // 1) OPEN in new tab / viewer (user gesture from button click)
+    try {
+      const win = window.open(url, "_blank");
+      if (win) {
+        // Release later to keep the viewer alive
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        return;
+      }
+    } catch {
+      // continue
     }
 
+    // 2) Download anchor fallback
     try {
-      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
@@ -573,13 +597,30 @@ export default function App() {
         URL.revokeObjectURL(url);
       }, 0);
       return;
-    } catch {}
-
-    try {
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank");
     } catch {
+      // continue
+    }
+
+    // 3) As LAST resort, Web Share (some phones with strict pop-up settings)
+    try {
+      const nav = navigator as any;
+      if (nav.share && nav.canShare) {
+        const file = new File([blob], filename, { type: "application/pdf" });
+        if (nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: filename, text: "" });
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // If everything fails, let jsPDF try its saver
+    try {
       doc.save(filename);
+    } catch {
+      alert("לא ניתן היה לפתוח/להוריד את ה-PDF במכשיר זה.");
     }
   }
 
@@ -627,26 +668,37 @@ export default function App() {
   return (
     <div className="container-app">
       <main className="w-full max-w-[1160px] flex flex-col gap-4">
-        {/* Top Bar */}
+        {/* Top Bar with re-arranged buttons */}
         <header className="flex items-center justify-between gap-3 px-2">
-          <div className="flex items-center gap-2">
-            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">א</div>
-            <h1 className="text-xl sm:text-2xl font-semibold">הצעת מחיר — אלום סמעאן</h1>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="h-9 w-9 shrink-0 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">א</div>
+            <h1 className="text-xl sm:text-2xl font-semibold truncate">הצעת מחיר — אלום סמעאן</h1>
           </div>
-          <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
-            <button
-              className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "quote" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
-              onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "quote" } }))}
-            >
-              הצעה
+
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {/* moved here per request */}
+            <button className="px-3 py-1.5 rounded-lg bg-white border hover:bg-slate-50" onClick={clearItemEditor}>
+              ניקוי
             </button>
-            <button
-              className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "customers" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
-              onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))}
-            >
-              לקוחות
+            <button className="px-3 py-1.5 rounded-lg bg-white border hover:bg-slate-50" onClick={newQuote}>
+              הצעה חדשה
             </button>
-          </nav>
+
+            <nav className="flex gap-1 rounded-xl p-1 bg-white/70 shadow">
+              <button
+                className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "quote" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
+                onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "quote" } }))}
+              >
+                הצעה
+              </button>
+              <button
+                className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "customers" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
+                onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))}
+              >
+                לקוחות
+              </button>
+            </nav>
+          </div>
         </header>
 
         {/* Quote tab */}
@@ -655,6 +707,7 @@ export default function App() {
             {/* Customer inline form */}
             <section className="card p-4">
               <h2 className="text-lg font-semibold mb-3">פרטי לקוח</h2>
+              {/* Fix stacking: full-width inputs that wrap nicely on phones */}
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <LabeledInput
                   label="שם לקוח*"
@@ -689,9 +742,10 @@ export default function App() {
             <section className="card p-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <h2 className="text-lg font-semibold">מחשבון פריט</h2>
-                <div className="text-sm text-slate-600">גובה העמוד מתאים לנייד (100vh אמיתי)</div>
+                <div className="text-sm text-slate-600">100vh אמיתי למובייל • בלי גלילה אופקית</div>
               </div>
 
+              {/* Fix input order: רוחב ואז גובה ואז כמות, all aligned */}
               <div className="grid grid-cols-1 sm:grid-cols-6 gap-3 mt-3">
                 <LabeledInput
                   label="רוחב (ס״מ)"
@@ -782,7 +836,7 @@ export default function App() {
                 <Stat label="סה״כ לפריט" value={fmtCurrency.format(liveLineSubtotal)} highlight />
               </div>
 
-              {/* Buttons (wrap on phones) */}
+              {/* Buttons (only what you asked to keep here) */}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
@@ -790,20 +844,8 @@ export default function App() {
                 >
                   הוסף להצעה
                 </button>
-                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={clearCurrentForm}>
-                  ניקוי
-                </button>
-                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={newQuote}>
-                  הצעה חדשה
-                </button>
                 <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={openSettings}>
                   הגדרות
-                </button>
-                <button className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95" onClick={saveQuote}>
-                  שמור הצעה
-                </button>
-                <button className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:opacity-95" onClick={generateAndExportPDF}>
-                  ייצוא ל-PDF
                 </button>
               </div>
             </section>
@@ -874,22 +916,34 @@ export default function App() {
                 </table>
               </div>
 
-              {/* Totals row */}
-              <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm">מע״מ (% או עשרוני):</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
-                    value={state.current.taxPercentText}
-                    onChange={(e) => updateCurrent("taxPercentText", e.target.value)}
-                  />
+              {/* Totals row + (moved here) action buttons */}
+              <div className="mt-4 grid gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm">מע״מ (% או עשרוני):</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
+                      value={state.current.taxPercentText}
+                      onChange={(e) => updateCurrent("taxPercentText", e.target.value)}
+                    />
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-sm">
+                    <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
+                    <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
+                    <Stat label="סה״כ לתשלום" value={fmtCurrency.format(grandTotal)} highlight />
+                  </div>
                 </div>
-                <div className="grid grid-cols-3 gap-3 text-sm">
-                  <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
-                  <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
-                  <Stat label="סה״כ לתשלום" value={fmtCurrency.format(grandTotal)} highlight />
+
+                {/* Per your request: keep "שמור הצעה" + "ייצוא ל-PDF" HERE */}
+                <div className="flex flex-wrap gap-2 justify-end">
+                  <button className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95" onClick={saveQuote}>
+                    שמור הצעה
+                  </button>
+                  <button className="px-4 py-2 rounded-lg bg-emerלד-600 text-white hover:opacity-95" onClick={generateAndExportPDF}>
+                    ייצוא ל-PDF
+                  </button>
                 </div>
               </div>
 
@@ -909,6 +963,7 @@ export default function App() {
             quotes={state.quotes}
             onOpenLast={openLastQuoteForCustomer}
             onNewFor={(c) => {
+              // "הזמנה חדשה" / start a clean quote for this customer
               setState((s) => ({
                 ...s,
                 ui: { ...s.ui, tab: "quote" },
@@ -923,17 +978,15 @@ export default function App() {
               }));
               setItemEditor(initItemEditor());
             }}
-            onEditCustomer={(c) => {
-              const name = prompt("שם לקוח", c.name) ?? c.name;
-              const phone = prompt("טלפון", c.phone ?? "") ?? c.phone ?? "";
-              const email = prompt("אימייל", c.email ?? "") ?? c.email ?? "";
-              const notes = prompt("הערות", c.notes ?? "") ?? c.notes ?? "";
+            onExportLast={(c) => exportLastForCustomer(c.id)}
+            onDeleteCustomer={(c) => {
+              if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
               setState((s) => ({
                 ...s,
-                customers: s.customers.map((x) => (x.id === c.id ? { ...x, name, phone, email, notes } : x)),
+                customers: s.customers.filter((x) => x.id !== c.id),
+                quotes: s.quotes.filter((q) => q.customerId !== c.id),
               }));
             }}
-            onDeleteCustomer={(c) => deleteCustomer(c.id)}
           />
         )}
 
@@ -942,7 +995,7 @@ export default function App() {
           <Modal onClose={closeSettings} title="הגדרות — ניהול פרופילים">
             <div className="modal-body p-4 space-y-4">
               <div className="text-sm text-slate-600">
-                הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר. הדיאלוג מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
+                הוספה/עריכה של פרופילים (4300, 7300 וכו׳) עם מחיר למ״ר. מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1032,12 +1085,12 @@ function LabeledInput(props: {
   inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
 }) {
   return (
-    <label className="grid gap-1.5">
+    <label className="grid gap-1.5 w-full">
       <span className="text-sm text-slate-700">{props.label}</span>
       <input
         type="text"
         inputMode={props.inputMode}
-        className="rounded-md bg-white border border-slate-300 px-3 py-2"
+        className="w-full rounded-md bg-white border border-slate-300 px-3 py-2"
         placeholder={props.placeholder}
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
@@ -1053,10 +1106,10 @@ function LabeledSelect(props: {
   options: { label: string; value: string }[];
 }) {
   return (
-    <label className="grid gap-1.5">
+    <label className="grid gap-1.5 w-full">
       <span className="text-sm text-slate-700">{props.label}</span>
       <select
-        className="rounded-md bg-white border border-slate-300 px-3 py-2"
+        className="w-full rounded-md bg-white border border-slate-300 px-3 py-2"
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
       >
@@ -1080,19 +1133,19 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th className="text-right px-3 py-2 text-slate-700 font-medium">{children}</th>;
+  return <th className="text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap">{children}</th>;
 }
 function Td({ children }: { children: React.ReactNode }) {
-  return <td className="text-right px-3 py-2 align-top">{children}</td>;
+  return <td className="text-right px-3 py-2 align-top whitespace-nowrap">{children}</td>;
 }
 
-/** Customers Page */
+/** Customers Page (simplified: no count column, no edit/new buttons, add export + new order) */
 function CustomersPage(props: {
   customers: Customer[];
   quotes: Quote[];
   onOpenLast: (customerId: string) => void;
-  onNewFor: (c: Customer) => void;
-  onEditCustomer: (c: Customer) => void;
+  onNewFor: (c: Customer) => void;         // "הזמנה חדשה"
+  onExportLast: (c: Customer) => void;     // Export last PDF directly
   onDeleteCustomer: (c: Customer) => void;
 }) {
   const latestMap = useMemo(() => {
@@ -1101,12 +1154,6 @@ function CustomersPage(props: {
     const latest: Record<string, Quote> = {};
     for (const id in grouped) latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
     return latest;
-  }, [props.quotes]);
-
-  const countMap = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const q of props.quotes) m[q.customerId] = (m[q.customerId] || 0) + 1;
-    return m;
   }, [props.quotes]);
 
   return (
@@ -1121,32 +1168,29 @@ function CustomersPage(props: {
           ) : (
             props.customers.map((c) => {
               const last = latestMap[c.id];
-              const count = countMap[c.id] || 0;
               return (
                 <div key={c.id} className="rounded-xl border p-3 bg-white">
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <div className="font-medium">{c.name}</div>
                       <div className="text-xs text-slate-600">
-                        הצעות: {count} {last ? `• אחרונה: ${fmtDate.format(new Date(last.date))} • ${fmtCurrency.format(last.totals.grand)}` : ""}
+                        {last ? `אחרונה: ${fmtDate.format(new Date(last.date))} • ${fmtCurrency.format(last.totals.grand)}` : "אין הצעה שמורה"}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
-                        פתח אחרונה
-                      </button>
                       <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
-                        הצעה חדשה
+                        הזמנה חדשה
+                      </button>
+                      <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                        פתח הצעה
+                      </button>
+                      <button className="px-3 py-1.5 rounded-md bg-emerald-600 text-white" onClick={() => props.onExportLast(c)}>
+                        ייצוא PDF
+                      </button>
+                      <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
+                        מחיקה
                       </button>
                     </div>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onEditCustomer(c)}>
-                      עריכה
-                    </button>
-                    <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
-                      מחיקה
-                    </button>
                   </div>
                 </div>
               );
@@ -1154,7 +1198,7 @@ function CustomersPage(props: {
           )}
         </div>
 
-        {/* Desktop: table */}
+        {/* Desktop: table (simplified columns) */}
         <div className="hidden sm:block table-scroll mt-2">
           <table className="table-inner-min w-full text-sm">
             <thead className="bg-slate-50">
@@ -1162,7 +1206,6 @@ function CustomersPage(props: {
                 <Th>שם</Th>
                 <Th>טלפון</Th>
                 <Th>אימייל</Th>
-                <Th>מס׳ הצעות</Th>
                 <Th>הצעה אחרונה</Th>
                 <Th>סכום אחרון</Th>
                 <Th>פעולות</Th>
@@ -1171,32 +1214,30 @@ function CustomersPage(props: {
             <tbody>
               {props.customers.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-6 text-center text-slate-500">
+                  <td colSpan={6} className="py-6 text-center text-slate-500">
                     אין לקוחות עדיין
                   </td>
                 </tr>
               ) : (
                 props.customers.map((c) => {
                   const last = latestMap[c.id];
-                  const count = countMap[c.id] || 0;
                   return (
                     <tr key={c.id} className="border-t">
                       <Td>{c.name}</Td>
                       <Td>{c.phone ?? ""}</Td>
                       <Td>{c.email ?? ""}</Td>
-                      <Td>{count}</Td>
                       <Td>{last ? fmtDate.format(new Date(last.date)) : ""}</Td>
                       <Td>{last ? fmtCurrency.format(last.totals.grand) : ""}</Td>
                       <Td>
                         <div className="flex flex-wrap gap-2">
-                          <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
-                            פתח אחרונה
-                          </button>
                           <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
-                            הצעה חדשה
+                            הזמנה חדשה
                           </button>
-                          <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onEditCustomer(c)}>
-                            עריכה
+                          <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                            פתח הצעה
+                          </button>
+                          <button className="px-3 py-1.5 rounded-md bg-emerald-600 text-white" onClick={() => props.onExportLast(c)}>
+                            ייצוא PDF
                           </button>
                           <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
                             מחיקה
