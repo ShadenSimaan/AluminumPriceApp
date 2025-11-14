@@ -16,10 +16,10 @@ type Customer = {
 type Quote = {
   id: string;
   customerId: string;
-  title: string;       // internal only (for filename)
-  date: number;        // epoch ms
+  title: string; // internal only (for filename)
+  date: number; // epoch ms
   items: LineItem[];
-  taxPercent: number;  // accepts 0.18 or 18
+  taxPercent: number; // accepts 0.18 or 18
   totals: { sub: number; tax: number; grand: number };
 };
 
@@ -32,7 +32,7 @@ type Profile = {
 type Addon = {
   id: string;
   name: string;
-  price: string;      // text input (per item)
+  price: string; // text input (per item)
   checked: boolean;
 };
 
@@ -47,7 +47,7 @@ type LineItem = {
   location?: string;
   details?: string;
   addons: Addon[];
-  subtotal: number;   // computed
+  subtotal: number; // computed
 };
 
 type AppState = {
@@ -100,7 +100,10 @@ function normalizeTaxPercent(n: number): number {
 }
 
 const fmtNumber = new Intl.NumberFormat("he-IL", { maximumFractionDigits: 2 });
-const fmtCurrency = new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS" });
+const fmtCurrency = new Intl.NumberFormat("he-IL", {
+  style: "currency",
+  currency: "ILS",
+});
 const fmtDate = new Intl.DateTimeFormat("he-IL", { dateStyle: "medium" });
 
 const defaultProfiles: Profile[] = [
@@ -116,7 +119,7 @@ const defaultAddonsPreset: Addon[] = [
   { id: uuid(), name: "תריס גלילה", price: "0", checked: false },
 ];
 
-/** ===== Default state + hydrate (guards localStorage) ===== */
+/** ===== Default state (used for migration/fallback) ===== */
 const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
@@ -134,16 +137,22 @@ const DEFAULT_STATE: AppState = {
   ui: { tab: "quote", settingsOpen: false },
 };
 
+/** ===== Validate + migrate any LS object to the proper shape ===== */
 function hydrateState(): AppState {
   const raw = localStorage.getItem(LS_KEY);
   if (!raw) return structuredClone(DEFAULT_STATE);
+
   try {
     const parsed = JSON.parse(raw);
-    const obj: Partial<AppState> = typeof parsed === "object" && parsed ? parsed : {};
+    const obj: Partial<AppState> =
+      typeof parsed === "object" && parsed ? parsed : {};
 
     const customers = Array.isArray(obj.customers) ? obj.customers : [];
     const quotes = Array.isArray(obj.quotes) ? obj.quotes : [];
-    const profiles = Array.isArray(obj.profiles) && obj.profiles.length > 0 ? obj.profiles : defaultProfiles;
+    const profiles =
+      Array.isArray(obj.profiles) && obj.profiles.length > 0
+        ? obj.profiles
+        : defaultProfiles;
 
     const currentRaw: any = obj.current ?? {};
     const current = {
@@ -158,12 +167,16 @@ function hydrateState(): AppState {
     };
 
     const uiRaw: any = obj.ui ?? {};
-    const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
+    const tab: "quote" | "customers" =
+      uiRaw.tab === "customers" ? "customers" : "quote";
     const ui = { tab, settingsOpen: Boolean(uiRaw.settingsOpen ?? false) };
 
-    return { customers, quotes, profiles, current, ui };
-  } catch {
-    try { localStorage.setItem(LS_KEY + ":backup", raw!); } catch {}
+    const safe: AppState = { customers, quotes, profiles, current, ui };
+    return safe;
+  } catch (e) {
+    try {
+      localStorage.setItem(LS_KEY + ":backup", raw!);
+    } catch {}
     return structuredClone(DEFAULT_STATE);
   }
 }
@@ -174,13 +187,53 @@ function hydrateState(): AppState {
 export default function App() {
   const [state, setState] = useState<AppState>(() => hydrateState());
 
-  // Auto-save: persists on ANY change (already covers crashes)
+  /** ======= Item Editor (inline calculator) ======= */
+  function initItemEditor(): LineItem {
+    return {
+      id: uuid(),
+      widthCm: "",
+      heightCm: "",
+      qty: "1",
+      profileId: undefined,
+      profileName: "",
+      unitPrice: "0",
+      location: "",
+      details: "",
+      addons: defaultAddonsPreset.map((a) => ({ ...a })),
+      subtotal: 0,
+    };
+  }
+  const [itemEditor, setItemEditor] = useState<LineItem>(initItemEditor());
+  const [activeProfileId, setActiveProfileId] = useState<string | undefined>(
+    undefined
+  );
+
+  // Persist on change (autosave)
   useEffect(() => {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
 
+  // Initialize default selected profile once after load (if exists)
+  useEffect(() => {
+    setActiveProfileId(
+      (prev) => prev ?? (state.profiles[0]?.id ?? undefined)
+    );
+  }, [state.profiles]);
+
+  useEffect(() => {
+    const p = state.profiles.find((p) => p.id === activeProfileId);
+    setItemEditor((e) => ({
+      ...e,
+      profileId: p?.id,
+      profileName: p?.name,
+      unitPrice: p ? String(p.unitPrice) : e.unitPrice,
+    }));
+  }, [activeProfileId, state.profiles]);
+
   /** ======= Derived values & helpers ======= */
-  const taxDecimal = normalizeTaxPercent(parseLooseNumber(state.current?.taxPercentText ?? "17"));
+  const taxDecimal = normalizeTaxPercent(
+    parseLooseNumber(state.current?.taxPercentText ?? "17")
+  );
   const subTotal = useMemo(
     () => state.current.items.reduce((a, it) => a + it.subtotal, 0),
     [state.current.items]
@@ -188,7 +241,39 @@ export default function App() {
   const taxValue = subTotal * taxDecimal;
   const grandTotal = subTotal + taxValue;
 
-  function updateCurrent<K extends keyof AppState["current"]>(key: K, val: AppState["current"][K]) {
+  const liveArea = useMemo(() => {
+    const w = parseLooseNumber(itemEditor.widthCm);
+    const h = parseLooseNumber(itemEditor.heightCm);
+    return (w * h) / 10000;
+  }, [itemEditor.widthCm, itemEditor.heightCm]);
+
+  const liveAddonsSumPerItem = useMemo(
+    () =>
+      itemEditor.addons.reduce(
+        (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
+        0
+      ),
+    [itemEditor.addons]
+  );
+
+  const livePerItemPrice = useMemo(() => {
+    const unit = parseLooseNumber(itemEditor.unitPrice);
+    return liveArea * unit + liveAddonsSumPerItem;
+  }, [liveArea, itemEditor.unitPrice, liveAddonsSumPerItem]);
+
+  const liveQty = useMemo(
+    () => Math.max(0, parseLooseNumber(itemEditor.qty)),
+    [itemEditor.qty]
+  );
+  const liveLineSubtotal = useMemo(
+    () => livePerItemPrice * liveQty,
+    [livePerItemPrice, liveQty]
+  );
+
+  function updateCurrent<K extends keyof AppState["current"]>(
+    key: K,
+    val: AppState["current"][K]
+  ) {
     setState((s) => ({ ...s, current: { ...s.current, [key]: val } }));
   }
 
@@ -201,7 +286,10 @@ export default function App() {
     const h = parseLooseNumber(heightCm);
     const qty = Math.max(0, parseLooseNumber(qtyText));
     const area = (w * h) / 10000; // m²
-    const addonsPerItem = (currentDraft?.addons ?? []).reduce((sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+    const addonsPerItem = (currentDraft?.addons ?? []).reduce(
+      (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
+      0
+    );
     const unitPriceNum = parseLooseNumber(unitPriceText);
     const perItemPrice = area * unitPriceNum + addonsPerItem;
     const subtotal = perItemPrice * qty;
@@ -224,94 +312,77 @@ export default function App() {
       ...s,
       current: { ...s.current, items: [...s.current.items, item] },
     }));
-  }
-
-  function removeItem(id: string) {
-    setState((s) => ({ ...s, current: { ...s.current, items: s.current.items.filter((it) => it.id !== id) } }));
-  }
-
-  function clearItemEditor() {
+    // Clear editor after adding
     setItemEditor(initItemEditor());
   }
 
-  function newQuote() {
+  function removeItem(id: string) {
     setState((s) => ({
       ...s,
       current: {
         ...s.current,
+        items: s.current.items.filter((it) => it.id !== id),
+      },
+    }));
+  }
+
+  function clearCurrentForm() {
+    setItemEditor(initItemEditor());
+  }
+
+  // Completely new empty quote and go to "הצעה" tab
+  function startNewEmptyQuote() {
+    setState((s) => ({
+      ...s,
+      ui: { ...s.ui, tab: "quote" },
+      current: {
+        ...s.current,
+        customerName: "",
+        customerPhone: "",
+        customerEmail: "",
+        customerNotes: "",
         title: "הצעת מחיר",
         items: [],
         notes: "",
-        taxPercentText: s.current.taxPercentText ?? "17",
       },
     }));
-    setItemEditor(initItemEditor());
-    setActiveProfileId(s.profiles[0]?.id ?? undefined);
+    clearCurrentForm();
   }
-
-  /** ======= Item Editor (inline calculator) ======= */
-  function initItemEditor(): LineItem {
-    return {
-      id: uuid(),
-      widthCm: "",
-      heightCm: "",
-      qty: "1",
-      profileId: undefined,
-      profileName: "",
-      unitPrice: "0",
-      location: "",
-      details: "",
-      addons: defaultAddonsPreset.map((a) => ({ ...a })),
-      subtotal: 0,
-    };
-  }
-  const [itemEditor, setItemEditor] = useState<LineItem>(initItemEditor());
-  const [activeProfileId, setActiveProfileId] = useState<string | undefined>(undefined);
-
-  // Initialize default selected profile once after load (if exists)
-  useEffect(() => {
-    setActiveProfileId((prev) => prev ?? (state.profiles[0]?.id ?? undefined));
-  }, [state.profiles]);
-
-  useEffect(() => {
-    const p = state.profiles.find((p) => p.id === activeProfileId);
-    setItemEditor((e) => ({ ...e, profileId: p?.id, profileName: p?.name, unitPrice: p ? String(p.unitPrice) : e.unitPrice }));
-  }, [activeProfileId, state.profiles]);
-
-  const liveArea = useMemo(() => {
-    const w = parseLooseNumber(itemEditor.widthCm);
-    const h = parseLooseNumber(itemEditor.heightCm);
-    return (w * h) / 10000;
-  }, [itemEditor.widthCm, itemEditor.heightCm]);
-
-  const liveAddonsSumPerItem = useMemo(
-    () => itemEditor.addons.reduce((sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0), 0),
-    [itemEditor.addons]
-  );
-
-  const livePerItemPrice = useMemo(() => {
-    const unit = parseLooseNumber(itemEditor.unitPrice);
-    return liveArea * unit + liveAddonsSumPerItem;
-  }, [liveArea, itemEditor.unitPrice, liveAddonsSumPerItem]);
-
-  const liveQty = useMemo(() => Math.max(0, parseLooseNumber(itemEditor.qty)), [itemEditor.qty]);
-  const liveLineSubtotal = useMemo(() => livePerItemPrice * liveQty, [livePerItemPrice, liveQty]);
 
   /** ======= Customers + Quotes helpers ======= */
-  function ensureCustomerByName(name: string, phone?: string, email?: string, notes?: string): Customer {
+  function ensureCustomerByName(
+    name: string,
+    phone?: string,
+    email?: string,
+    notes?: string
+  ): Customer {
     const trimmed = name.trim();
     const existing = state.customers.find((c) => c.name === trimmed);
     if (existing) {
-      const updated: Customer = { ...existing, phone: phone || existing.phone, email: email || existing.email, notes: notes ?? existing.notes };
+      const updated: Customer = {
+        ...existing,
+        phone: phone || existing.phone,
+        email: email || existing.email,
+        notes: notes ?? existing.notes,
+      };
       if (JSON.stringify(updated) !== JSON.stringify(existing)) {
         setState((s) => ({
           ...s,
-          customers: s.customers.map((c) => (c.id === updated.id ? updated : c)),
+          customers: s.customers.map((c) =>
+            c.id === updated.id ? updated : c
+          ),
         }));
       }
       return updated;
     }
-    const created: Customer = { id: uuid(), name: trimmed, phone, email, notes, createdAt: Date.now() };
+    const created: Customer = {
+      id: uuid(),
+      name: trimmed,
+      phone,
+      email,
+      notes,
+      createdAt: Date.now(),
+    };
     setState((s) => ({ ...s, customers: [...s.customers, created] }));
     return created;
   }
@@ -327,6 +398,7 @@ export default function App() {
       state.current.customerEmail,
       state.current.customerNotes
     );
+
     const quote: Quote = {
       id: uuid(),
       customerId: customer.id,
@@ -336,14 +408,24 @@ export default function App() {
       taxPercent: parseLooseNumber(state.current.taxPercentText ?? "17"),
       totals: { sub: subTotal, tax: taxValue, grand: grandTotal },
     };
-    setState((s) => ({ ...s, quotes: [...s.quotes, quote] }));
-    alert("הצעה נשמרה בהצלחה");
+
+    // Keep only one quote per customer (overwrite old)
+    setState((s) => ({
+      ...s,
+      quotes: [...s.quotes.filter((q) => q.customerId !== customer.id), quote],
+    }));
+    alert("הצעה נשמרה ללקוח");
   }
 
   function openLastQuoteForCustomer(customerId: string) {
-    const q = [...state.quotes].filter((x) => x.customerId === customerId).sort((a, b) => b.date - a.date)[0];
+    const q = [...state.quotes]
+      .filter((x) => x.customerId === customerId)
+      .sort((a, b) => b.date - a.date)[0];
     const customer = state.customers.find((c) => c.id === customerId);
-    if (!q || !customer) return;
+    if (!q || !customer) {
+      alert("אין הצעה שמורה ללקוח זה");
+      return;
+    }
     setState((s) => ({
       ...s,
       ui: { ...s.ui, tab: "quote" },
@@ -359,273 +441,552 @@ export default function App() {
         notes: s.current.notes,
       },
     }));
-    setItemEditor(initItemEditor());
+    clearCurrentForm();
   }
 
-  /** Export latest quote for a customer immediately (from לקוחות page) */
-  async function exportLastForCustomer(customerId: string) {
-    const q = [...state.quotes].filter((x) => x.customerId === customerId).sort((a, b) => b.date - a.date)[0];
-    const customer = state.customers.find((c) => c.id === customerId);
-    if (!q || !customer) {
+  function deleteCustomer(customerId: string) {
+    if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
+    setState((s) => ({
+      ...s,
+      customers: s.customers.filter((c) => c.id !== customerId),
+      quotes: s.quotes.filter((q) => q.customerId !== customerId),
+    }));
+  }
+
+  // Export last quote for customer from לקוחות page
+  function exportLastQuoteForCustomer(customerId: string) {
+    const hasQuote = state.quotes.some((q) => q.customerId === customerId);
+    if (!hasQuote) {
       alert("אין הצעה שמורה ללקוח זה");
       return;
     }
-    // Load into current, then call export
-    setState((s) => ({
-      ...s,
-      ui: { ...s.ui, tab: "quote" },
-      current: {
-        ...s.current,
-        customerName: customer.name,
-        customerPhone: customer.phone ?? "",
-        customerEmail: customer.email ?? "",
-        customerNotes: customer.notes ?? "",
-        items: q.items.map((it) => ({ ...it })), // keep as-is
-        title: q.title,
-        taxPercentText: String(q.taxPercent ?? "17"),
-        notes: s.current.notes,
-      },
-    }));
-    setTimeout(() => generateAndExportPDF(), 0);
+    openLastQuoteForCustomer(customerId);
+    setTimeout(() => {
+      generateAndExportPDF();
+    }, 0);
   }
 
-  /** ======= PDF Export (now prefers OPEN first, then download, then share) ======= */
-  async function generateAndExportPDF() {
-    let jsPDFMod: any, autoTableMod: any;
-    try {
-      jsPDFMod = await import("jspdf");
-      autoTableMod = await import("jspdf-autotable");
-    } catch (e) {
-      alert("חסרות חבילות PDF. התקן/י: npm i jspdf jspdf-autotable");
-      return;
-    }
-    const jsPDF = jsPDFMod.default || jsPDFMod;
-    const autoTable = (autoTableMod.default || autoTableMod) as any;
 
-    if (!state.current.customerName.trim()) {
-      alert("אנא הזן/י שם לקוח לפני יצוא PDF");
-      return;
-    }
-    if (state.current.items.length === 0) {
-      alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
-      return;
-    }
+  
+//===================================================================================================================================================================
+//===================================================================================================================================================================
+//===================================================================================================================================================================
 
-    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-    (doc as any).setR2L?.(true);
+// ======== PDF EXPORT (HEBREW FIXED: NORMAL + BOLD FONT) ========
+// ======== PDF EXPORT (STYLED + FIXED HEBREW/LTR) ========
 
-    await ensureHebrewFont(doc);
-    doc.setFont("NotoHebrew", "normal");
-    doc.setFontSize(12);
+const PDF_FONT_NAME = "NotoHebrew";
+const PDF_FONT_FILE = "NotoSansHebrew-Regular.ttf"; // expects /fonts/NotoSansHebrew-Regular.ttf
+const HEBREW_REGEX = /[\u0590-\u05FF]/;
 
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const marginX = 40;
-    let cursorY = 40;
+// Detect if a string is mostly RTL (Hebrew) or LTR (English/Latin)
+function isRTLText(text: string): boolean {
+  return HEBREW_REGEX.test(text);
+}
 
-    const headerLines = [
-      "אלום סמעאן סאמי",
-      "ביצוע עבודות אלומיניום ותריס",
-      "פסוטה   ת.ד 528             טל/פקס : 9870933          נייד0526475531",
-      "ע.מ. מס' 023107659",
-    ];
-    doc.setFontSize(13);
-    headerLines.forEach((line) => {
-      doc.text(line, pageWidth / 2, cursorY);
-      cursorY += 18;
+// Draw text with smart direction: Hebrew → RTL/right, English → LTR/left or center
+function drawTextSmart(
+  doc: any,
+  text: string,
+  x: number,
+  y: number,
+  opts: { align?: "left" | "right" | "center"; forceRtl?: boolean } = {}
+) {
+  const rtl = opts.forceRtl ?? isRTLText(text);
+  const align = opts.align ?? (rtl ? "right" : "left");
+
+  const prevR2L = (doc as any).R2L;
+  try {
+    (doc as any).setR2L?.(rtl);
+  } catch {}
+  doc.text(text, x, y, { align });
+  try {
+    (doc as any).setR2L?.(prevR2L);
+  } catch {}
+}
+
+async function generateAndExportPDF() {
+  let jsPDFMod: any;
+  try {
+    jsPDFMod = await import("jspdf");
+  } catch (e) {
+    alert("חסרות חבילות PDF. התקן/י: npm i jspdf");
+    return;
+  }
+  const jsPDF = jsPDFMod.default || jsPDFMod;
+
+  if (!state.current.customerName.trim()) {
+    alert("אנא הזן/י שם לקוח לפני יצוא PDF");
+    return;
+  }
+  if (state.current.items.length === 0) {
+    alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
+    return;
+  }
+
+  const doc = new jsPDF({
+    orientation: "portrait",
+    unit: "pt",
+    format: "a4",
+  });
+
+  await ensureHebrewFont(doc);
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = 40;
+  const marginTop = 40;
+  const marginBottom = 40;
+
+  let cursorY = marginTop;
+
+  // ===== Header =====
+  const headerLines = [
+    "אלום סמעאן סאמי",
+    "ביצוע עבודות אלומיניום ותריס",
+    "פסוטה   ת.ד 528             טל/פקס : 9870933          נייד0526475531",
+    "ע.מ. מס' 023107659",
+  ];
+
+  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFontSize(13);
+  headerLines.forEach((line) => {
+    drawTextSmart(doc, line, pageWidth / 2, cursorY, {
+      align: "center",
+      forceRtl: true,
     });
-    doc.setFontSize(12);
-    cursorY += 10;
+    cursorY += 18;
+  });
 
-    const customerLine = [state.current.customerName, state.current.customerPhone].filter(Boolean).join(" • ");
-    const email = state.current.customerEmail?.trim();
-    doc.text(customerLine, pageWidth / 2, cursorY, { align: "center" });
+  doc.setFont(PDF_FONT_NAME, "normal");
+  doc.setFontSize(12);
+  cursorY += 10;
+
+  // ===== Customer block =====
+  const customerLine = [state.current.customerName, state.current.customerPhone]
+    .filter(Boolean)
+    .join(" • ");
+  const emailLine = state.current.customerEmail?.trim() || "";
+
+  if (customerLine) {
+    drawTextSmart(doc, customerLine, pageWidth / 2, cursorY, {
+      align: "center",
+    });
     cursorY += 16;
-    if (email) {
-      doc.text(email, pageWidth / 2, cursorY, { align: "center" });
-      cursorY += 16;
+  }
+  if (emailLine) {
+    // Emails should be LTR and centered
+    drawTextSmart(doc, emailLine, pageWidth / 2, cursorY, {
+      align: "center",
+      forceRtl: false,
+    });
+    cursorY += 16;
+  }
+
+  // Divider line
+  doc.setDrawColor(200);
+  doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
+  cursorY += 12;
+
+  // ===== Items table =====
+  cursorY = drawItemsTable(
+    doc,
+    state.current.items,
+    cursorY,
+    marginX,
+    pageWidth,
+    pageHeight,
+    marginTop,
+    marginBottom
+  );
+
+  // ===== Totals box =====
+  const boxWidth = 240;
+  const boxX = pageWidth - marginX - boxWidth;
+  let boxY = cursorY + 18;
+
+  const sub = state.current.items.reduce((a, it) => a + it.subtotal, 0);
+  const taxDecimalNow = normalizeTaxPercent(
+    parseLooseNumber(state.current.taxPercentText ?? "17")
+  );
+  const vat = sub * taxDecimalNow;
+  const grand = sub + vat;
+
+  doc.setDrawColor(210);
+  doc.roundedRect(boxX, boxY, boxWidth, 96, 8, 8);
+  boxY += 24;
+
+  doc.setFont(PDF_FONT_NAME, "normal");
+  drawTextSmart(
+    doc,
+    `מחיר: ${fmtCurrency.format(sub)}`,
+    boxX + boxWidth - 12,
+    boxY,
+    { align: "right" }
+  );
+  boxY += 22;
+  drawTextSmart(
+    doc,
+    `מע״מ: ${fmtCurrency.format(vat)}`,
+    boxX + boxWidth - 12,
+    boxY,
+    { align: "right" }
+  );
+  boxY += 24;
+
+  // Highlighted grand total
+  doc.setFillColor(236, 248, 255);
+  doc.roundedRect(boxX + 10, boxY - 18, boxWidth - 20, 30, 6, 6, "F");
+  doc.setFont(PDF_FONT_NAME, "bold");
+  drawTextSmart(
+    doc,
+    `סה״כ לתשלום: ${fmtCurrency.format(grand)}`,
+    boxX + boxWidth - 18,
+    boxY + 2,
+    { align: "right" }
+  );
+  doc.setFont(PDF_FONT_NAME, "normal");
+
+  // ===== Footer: date + notes + signature =====
+  let footerY = Math.max(boxY + 36, cursorY + 120);
+
+  drawTextSmart(
+    doc,
+    `תאריך: ${fmtDate.format(new Date())}`,
+    pageWidth - marginX,
+    footerY,
+    { align: "right" }
+  );
+  footerY += 18;
+
+  if (state.current.notes?.trim()) {
+    const notesText = `הערות: ${state.current.notes.trim()}`;
+    const wrapped = doc.splitTextToSize(
+      notesText,
+      pageWidth - marginX * 2
+    );
+    // draw each line with smart RTL handling
+    wrapped.forEach((line: string, idx: number) => {
+      drawTextSmart(
+        doc,
+        line,
+        pageWidth - marginX,
+        footerY + idx * 14,
+        { align: "right" }
+      );
+    });
+    footerY += wrapped.length * 14 + 10;
+  }
+
+  drawTextSmart(doc, "חתימה:", pageWidth - marginX, footerY, {
+    align: "right",
+  });
+
+  try {
+    const sigResp = await fetch("/signature.png");
+    if (sigResp.ok) {
+      const blob = await sigResp.blob();
+      const dataUrl = await blobToDataUrl(blob);
+      doc.addImage(
+        dataUrl,
+        "PNG",
+        pageWidth - marginX - 160,
+        footerY - 18,
+        140,
+        48
+      );
+    }
+  } catch {
+    // ignore
+  }
+
+  const filename = `${state.current.title || "הצעת מחיר"}.pdf`;
+  await androidSafeSave(doc, filename);
+}
+
+// Stylish table: zebra rows, proper column widths, smart RTL/LTR text
+function drawItemsTable(
+  doc: any,
+  items: LineItem[],
+  startY: number,
+  marginX: number,
+  pageWidth: number,
+  pageHeight: number,
+  marginTop: number,
+  marginBottom: number
+): number {
+  const right = pageWidth - marginX;
+  const left = marginX;
+
+  // Column widths sum == page content width (no overflow)
+  const colWidths = {
+    num: 25,
+    dims: 60,
+    location: 70,
+    details: 180,
+    unitPrice: 75,
+    qty: 45,
+    total: 60,
+  }; // 25+60+70+180+75+45+60 = 515
+
+  // Right edges (RTL layout, from right to left)
+  const colX = {
+    total: right,
+    qty: right - colWidths.total,
+    unitPrice: right - colWidths.total - colWidths.qty,
+    details:
+      right - colWidths.total - colWidths.qty - colWidths.unitPrice,
+    location:
+      right -
+      colWidths.total -
+      colWidths.qty -
+      colWidths.unitPrice -
+      colWidths.details,
+    dims:
+      right -
+      colWidths.total -
+      colWidths.qty -
+      colWidths.unitPrice -
+      colWidths.details -
+      colWidths.location,
+    num:
+      right -
+      colWidths.total -
+      colWidths.qty -
+      colWidths.unitPrice -
+      colWidths.details -
+      colWidths.location -
+      colWidths.dims,
+  };
+
+  const headerHeight = 24;
+  const rowLineHeight = 14;
+  let y = startY;
+
+  const drawHeader = () => {
+    if (y + headerHeight > pageHeight - marginBottom) {
+      doc.addPage();
+      doc.setFont(PDF_FONT_NAME, "normal");
+      y = marginTop;
     }
 
-    doc.setDrawColor(180);
-    doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
-    cursorY += 10;
-
-    const bodyRows = state.current.items.map((it, idx) => {
-      const w = parseLooseNumber(it.widthCm);
-      const h = parseLooseNumber(it.heightCm);
-      const dims = `${fmtNumber.format(w)}×${fmtNumber.format(h)}`;
-      const addonsText = it.addons.filter(a => a.checked).map(a => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`).join(" • ");
-      const details = [it.details, addonsText].filter(Boolean).join(" — ");
-      const qty = Math.max(0, parseLooseNumber(it.qty));
-      const area = (w * h) / 10000;
-      const addonsSum = it.addons.reduce((s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0), 0);
-      const unitPriceNum = parseLooseNumber(it.unitPrice);
-      const perItemPrice = area * unitPriceNum + addonsSum;
-
-      return [
-        String(idx + 1),
-        dims,
-        it.location || "",
-        details || "",
-        fmtCurrency.format(perItemPrice),
-        fmtNumber.format(qty),
-        fmtCurrency.format(perItemPrice * qty),
-      ];
-    });
-
-    autoTable(doc, {
-      startY: cursorY,
-      styles: { font: "NotoHebrew", fontSize: 11, halign: "right" },
-      headStyles: { fillColor: [236, 248, 255], textColor: 20 },
-      head: [["מס׳", "מידות (ס״מ)", "מיקום", "פרטים", "מחיר ליח׳", "כמות", "סה״כ"]],
-      body: bodyRows,
-      margin: { left: marginX, right: marginX },
-      tableLineColor: 230,
-      tableLineWidth: 0.5,
-    });
-
-    const tableY = (doc as any).lastAutoTable?.finalY ?? cursorY + 20;
-
-    const boxWidth = 240;
-    const boxX = pageWidth - marginX - boxWidth;
-    let boxY = tableY + 18;
-
-    const sub = state.current.items.reduce((a, it) => a + it.subtotal, 0);
-    const taxDecimalNow = normalizeTaxPercent(parseLooseNumber(state.current.taxPercentText ?? "17"));
-    const vat = sub * taxDecimalNow;
-    const grand = sub + vat;
-
-    doc.setDrawColor(180);
-    doc.roundedRect(boxX, boxY, boxWidth, 92, 6, 6);
-    boxY += 22;
-    doc.text(`מחיר: ${fmtCurrency.format(sub)}`, boxX + boxWidth - 12, boxY, { align: "right" });
-    boxY += 22;
-    doc.text(`מע״מ: ${fmtCurrency.format(vat)}`, boxX + boxWidth - 12, boxY, { align: "right" });
-    boxY += 24;
+    // header background
     doc.setFillColor(236, 248, 255);
-    doc.roundedRect(boxX + 8, boxY - 18, boxWidth - 16, 28, 5, 5, "F");
-    doc.setTextColor(0);
-    doc.setFont(undefined, "bold");
-    doc.text(`סה״כ לתשלום: ${fmtCurrency.format(grand)}`, boxX + boxWidth - 16, boxY, { align: "right" });
-    doc.setFont(undefined, "normal");
+    doc.roundedRect(left, y, right - left, headerHeight, 6, 6, "F");
+    doc.setDrawColor(210);
+    doc.roundedRect(left, y, right - left, headerHeight, 6, 6);
 
-    let footerY = Math.max(boxY + 28, tableY + 120);
-    footerY += 12;
-    doc.text(`תאריך: ${fmtDate.format(new Date())}`, pageWidth - marginX, footerY, { align: "right" });
-    footerY += 18;
+    const centerY = y + headerHeight / 2 + 4;
 
-    if (state.current.notes?.trim()) {
-      const lines = doc.splitTextToSize(`הערות: ${state.current.notes.trim()}`, pageWidth - marginX * 2);
-      doc.text(lines, pageWidth - marginX, footerY, { align: "right" });
-      footerY += lines.length * 14 + 10;
-    }
-
-    doc.text("חתימה:", pageWidth - marginX, footerY, { align: "right" });
-    try {
-      const sigResp = await fetch("/signature.png");
-      if (sigResp.ok) {
-        const blob = await sigResp.blob();
-        const dataUrl = await blobToDataUrl(blob);
-        doc.addImage(dataUrl, "PNG", pageWidth - marginX - 160, footerY - 18, 140, 48);
-      }
-    } catch {}
-
-    const filename = `${state.current.title || "הצעת מחיר"}.pdf`;
-    await openFirstThenDownloadThenShare(doc, filename);
-  }
-
-  async function ensureHebrewFont(doc: any) {
-    try {
-      const fontResp = await fetch("/fonts/NotoSansHebrew-Regular.ttf");
-      if (!fontResp.ok) throw new Error("font missing");
-      const buf = await fontResp.arrayBuffer();
-      const base64 = arrayBufferToBase64(buf);
-      doc.addFileToVFS("NotoSansHebrew-Regular.ttf", base64);
-      doc.addFont("NotoSansHebrew-Regular.ttf", "NotoHebrew", "normal");
-    } catch (e) {
-      console.warn("Hebrew font not found at /fonts/NotoSansHebrew-Regular.ttf. Proceeding with default font.", e);
-    }
-  }
-
-  function arrayBufferToBase64(buffer: ArrayBuffer) {
-    let binary = "";
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
-  }
-
-  function blobToDataUrl(blob: Blob): Promise<string> {
-    return new Promise((res, rej) => {
-      const fr = new FileReader();
-      fr.onload = () => res(String(fr.result));
-      fr.onerror = rej;
-      fr.readAsDataURL(blob);
+    doc.setFont(PDF_FONT_NAME, "bold");
+    drawTextSmart(
+      doc,
+      "מידות )ס״מ(",
+      colX.dims - 4,
+      centerY,
+      { align: "right" }
+    );
+    drawTextSmart(doc, "מיקום", colX.location - 4, centerY, {
+      align: "right",
     });
-  }
+    drawTextSmart(doc, "פרטים", colX.details - 4, centerY, {
+      align: "right",
+    });
+    drawTextSmart(doc, "מחיר ליח׳", colX.unitPrice - 4, centerY, {
+      align: "right",
+    });
+    drawTextSmart(doc, "כמות", colX.qty - 4, centerY, {
+      align: "right",
+    });
+    drawTextSmart(doc, "סה״כ", colX.total - 4, centerY, {
+      align: "right",
+    });
+    drawTextSmart(doc, "מס׳", colX.num - 4, centerY, { align: "right" });
 
-  /** New order of operations for better phone + desktop behavior:
-   *  1) Try opening a blob URL in a NEW TAB (most reliable viewer)
-   *  2) If blocked, try a hidden <a download>
-   *  3) Lastly, try Web Share (if supported)
-   */
-  async function openFirstThenDownloadThenShare(doc: any, filename: string) {
-    const blob = doc.output("blob");
-    const url = URL.createObjectURL(blob);
+    doc.setFont(PDF_FONT_NAME, "normal");
 
-    // 1) OPEN in new tab / viewer (user gesture from button click)
-    try {
-      const win = window.open(url, "_blank");
-      if (win) {
-        // Release later to keep the viewer alive
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        return;
-      }
-    } catch {
-      // continue
+    y += headerHeight;
+  };
+
+  const drawRowBorders = (rowHeight: number, startYRow: number) => {
+    doc.setDrawColor(230);
+    doc.rect(left, startYRow, right - left, rowHeight);
+
+    const xs = [
+      colX.total - colWidths.total,
+      colX.qty - colWidths.qty,
+      colX.unitPrice - colWidths.unitPrice,
+      colX.details - colWidths.details,
+      colX.location - colWidths.location,
+      colX.dims - colWidths.dims,
+    ];
+    xs.forEach((x) => {
+      doc.line(x, startYRow, x, startYRow + rowHeight);
+    });
+  };
+
+  if (items.length === 0) return y;
+
+  drawHeader();
+
+  items.forEach((it, idx) => {
+    const w = parseLooseNumber(it.widthCm);
+    const h = parseLooseNumber(it.heightCm);
+    const dims = `${fmtNumber.format(w)}×${fmtNumber.format(h)}`;
+
+    const addonsText = it.addons
+      .filter((a) => a.checked)
+      .map((a) => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`)
+      .join(" • ");
+
+    const detailsFull = [it.details, addonsText].filter(Boolean).join(" — ");
+
+    const qty = Math.max(0, parseLooseNumber(it.qty));
+    const area = (w * h) / 10000;
+    const addonsSum = it.addons.reduce(
+      (s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0),
+      0
+    );
+    const unitPriceNum = parseLooseNumber(it.unitPrice);
+    const perItemPrice = area * unitPriceNum + addonsSum;
+    const lineTotal = perItemPrice * qty;
+
+    const numStr = String(idx + 1);
+    const locStr = it.location || "";
+    const unitPriceStr = fmtCurrency.format(perItemPrice);
+    const qtyStr = fmtNumber.format(qty);
+    const totalStr = fmtCurrency.format(lineTotal);
+
+    const detailsMaxWidth = colWidths.details - 8;
+    const detailsLines = detailsFull
+      ? doc.splitTextToSize(detailsFull, detailsMaxWidth)
+      : [];
+
+    const linesCount = Math.max(1, detailsLines.length);
+    const rowHeight = linesCount * rowLineHeight + 6;
+
+    // new page if needed
+    if (y + rowHeight > pageHeight - marginBottom) {
+      doc.addPage();
+      doc.setFont(PDF_FONT_NAME, "normal");
+      y = marginTop;
+      drawHeader();
     }
 
-    // 2) Download anchor fallback
-    try {
+    const rowTop = y;
+    const baseline = y + rowLineHeight + 2;
+
+    // zebra background
+    if (idx % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(left, rowTop, right - left, rowHeight, "F");
+    }
+
+    drawRowBorders(rowHeight, rowTop);
+
+    doc.setFont(PDF_FONT_NAME, "normal");
+    drawTextSmart(doc, numStr, colX.num - 4, baseline, { align: "right" });
+    drawTextSmart(doc, dims, colX.dims - 4, baseline, { align: "right" });
+    if (locStr) {
+      drawTextSmart(doc, locStr, colX.location - 4, baseline, {
+        align: "right",
+      });
+    }
+    if (detailsLines.length > 0) {
+      let dy = baseline;
+      detailsLines.forEach((line: string) => {
+        drawTextSmart(doc, line, colX.details - 4, dy, { align: "right" });
+        dy += rowLineHeight;
+      });
+    }
+    drawTextSmart(
+      doc,
+      unitPriceStr,
+      colX.unitPrice - 4,
+      baseline,
+      { align: "right" }
+    );
+    drawTextSmart(doc, qtyStr, colX.qty - 4, baseline, {
+      align: "right",
+    });
+    drawTextSmart(doc, totalStr, colX.total - 4, baseline, {
+      align: "right",
+    });
+
+    y += rowHeight;
+  });
+
+  return y;
+}
+
+// register Noto font both as "normal" & "bold"
+async function ensureHebrewFont(doc: any) {
+  try {
+    const fontResp = await fetch("/fonts/NotoSansHebrew-Regular.ttf");
+    if (!fontResp.ok) throw new Error("font missing");
+    const buf = await fontResp.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
+
+    doc.addFileToVFS(PDF_FONT_FILE, base64);
+    doc.addFont(PDF_FONT_FILE, PDF_FONT_NAME, "normal");
+    doc.addFont(PDF_FONT_FILE, PDF_FONT_NAME, "bold");
+    doc.setFont(PDF_FONT_NAME, "normal");
+  } catch (e) {
+    console.warn(
+      "Hebrew font not found at /fonts/NotoSansHebrew-Regular.ttf. Proceeding with default font.",
+      e
+    );
+  }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result));
+    fr.onerror = rej;
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function androidSafeSave(doc: any, filename: string) {
+  const blob = doc.output("blob");
+  const url = URL.createObjectURL(blob);
+
+  try {
+    const win = window.open(url, "_blank");
+    if (!win) {
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       a.style.display = "none";
       document.body.appendChild(a);
       a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, 0);
-      return;
-    } catch {
-      // continue
+      document.body.removeChild(a);
     }
-
-    // 3) As LAST resort, Web Share (some phones with strict pop-up settings)
-    try {
-      const nav = navigator as any;
-      if (nav.share && nav.canShare) {
-        const file = new File([blob], filename, { type: "application/pdf" });
-        if (nav.canShare({ files: [file] })) {
-          await nav.share({ files: [file], title: filename, text: "" });
-          URL.revokeObjectURL(url);
-          return;
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    // If everything fails, let jsPDF try its saver
-    try {
-      doc.save(filename);
-    } catch {
-      alert("לא ניתן היה לפתוח/להוריד את ה-PDF במכשיר זה.");
-    }
+  } catch {
+    doc.save(filename);
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
+}
 
-  /** ======= Settings dialog: profiles CRUD ======= */
-  const [profileDraft, setProfileDraft] = useState<{ id?: string; name: string; unitPrice: string }>({ name: "", unitPrice: "" });
+//===================================================================================================================================================================
+//===================================================================================================================================================================
+//===================================================================================================================================================================
+/** ======= Settings dialog: profiles CRUD ======= */
+  const [profileDraft, setProfileDraft] = useState<{
+    id?: string;
+    name: string;
+    unitPrice: string;
+  }>({ name: "", unitPrice: "" });
 
   function openSettings() {
     setState((s) => ({ ...s, ui: { ...s.ui, settingsOpen: true } }));
@@ -651,7 +1012,13 @@ export default function App() {
     setState((s) => ({
       ...s,
       profiles: s.profiles.map((p) =>
-        p.id === profileDraft.id ? { ...p, name: profileDraft.name.trim() || p.name, unitPrice: parseLooseNumber(profileDraft.unitPrice) } : p
+        p.id === profileDraft.id
+          ? {
+              ...p,
+              name: profileDraft.name.trim() || p.name,
+              unitPrice: parseLooseNumber(profileDraft.unitPrice),
+            }
+          : p
       ),
     }));
     setProfileDraft({ name: "", unitPrice: "" });
@@ -667,48 +1034,74 @@ export default function App() {
   /** ======= UI ========= */
   return (
     <div className="container-app">
-      <main className="w-full max-w-[1160px] flex flex-col gap-4">
-        {/* Top Bar with re-arranged buttons */}
-        <header className="flex items-center justify-between gap-3 px-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="h-9 w-9 shrink-0 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">א</div>
-            <h1 className="text-xl sm:text-2xl font-semibold truncate">הצעת מחיר — אלום סמעאן</h1>
+      <main className="w-full max-w-[1160px] flex flex-col gap-4 px-2">
+        {/* Top Bar */}
+        <header className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">
+              א
+            </div>
+            <h1 className="text-xl sm:text-2xl font-semibold">
+              הצעת מחיר — אלום סמעאן
+            </h1>
           </div>
-
-          <div className="flex items-center gap-2 flex-wrap justify-end">
-            {/* moved here per request */}
-            <button className="px-3 py-1.5 rounded-lg bg-white border hover:bg-slate-50" onClick={clearItemEditor}>
-              ניקוי
-            </button>
-            <button className="px-3 py-1.5 rounded-lg bg-white border hover:bg-slate-50" onClick={newQuote}>
-              הצעה חדשה
-            </button>
-
-            <nav className="flex gap-1 rounded-xl p-1 bg-white/70 shadow">
+          <div className="flex items-center gap-2">
+            <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
               <button
-                className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "quote" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
-                onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "quote" } }))}
+                className={`px-3 py-1.5 rounded-lg text-sm ${
+                  state.ui.tab === "quote"
+                    ? "bg-sky-500 text-white"
+                    : "hover:bg-slate-100"
+                }`}
+                onClick={() =>
+                  setState((s) => ({ ...s, ui: { ...s.ui, tab: "quote" } }))
+                }
               >
                 הצעה
               </button>
               <button
-                className={`px-3 py-1.5 rounded-lg text-sm ${state.ui.tab === "customers" ? "bg-sky-500 text-white" : "hover:bg-slate-100"}`}
-                onClick={() => setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))}
+                className={`px-3 py-1.5 rounded-lg text-sm ${
+                  state.ui.tab === "customers"
+                    ? "bg-sky-500 text-white"
+                    : "hover:bg-slate-100"
+                }`}
+                onClick={() =>
+                  setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))
+                }
               >
                 לקוחות
               </button>
             </nav>
+            {state.ui.tab === "quote" && (
+              <button
+                className="hidden sm:inline-flex px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
+                onClick={startNewEmptyQuote}
+              >
+                הצעה חדשה
+              </button>
+            )}
           </div>
         </header>
 
+        {/* "הצעה חדשה" button for mobile */}
+        {state.ui.tab === "quote" && (
+          <div className="sm:hidden">
+            <button
+              className="w-full rounded-lg bg-emerald-600 text-white text-sm py-2 mb-1"
+              onClick={startNewEmptyQuote}
+            >
+              הצעה חדשה
+            </button>
+          </div>
+        )}
+
         {/* Quote tab */}
         {state.ui.tab === "quote" ? (
-          <section className="grid gap-4 px-2">
+          <section className="grid gap-4">
             {/* Customer inline form */}
-            <section className="card p-4">
+            <section className="card p-4 w-full">
               <h2 className="text-lg font-semibold mb-3">פרטי לקוח</h2>
-              {/* Fix stacking: full-width inputs that wrap nicely on phones */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <LabeledInput
                   label="שם לקוח*"
                   placeholder="חובה"
@@ -739,24 +1132,30 @@ export default function App() {
             </section>
 
             {/* Calculator + Add item */}
-            <section className="card p-4">
+            <section className="card p-4 w-full">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <h2 className="text-lg font-semibold">מחשבון פריט</h2>
-                <div className="text-sm text-slate-600">100vh אמיתי למובייל • בלי גלילה אופקית</div>
+                <div className="text-sm text-slate-600">
+                  גובה הממשק מותאם לנייד (100vh אמיתי)
+                </div>
               </div>
 
-              {/* Fix input order: רוחב ואז גובה ואז כמות, all aligned */}
-              <div className="grid grid-cols-1 sm:grid-cols-6 gap-3 mt-3">
+              {/* Row 1: width / height / qty (no col-span tricks) */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                 <LabeledInput
                   label="רוחב (ס״מ)"
                   value={itemEditor.widthCm}
-                  onChange={(v) => setItemEditor({ ...itemEditor, widthCm: v })}
+                  onChange={(v) =>
+                    setItemEditor({ ...itemEditor, widthCm: v })
+                  }
                   inputMode="numeric"
                 />
                 <LabeledInput
                   label="גובה (ס״מ)"
                   value={itemEditor.heightCm}
-                  onChange={(v) => setItemEditor({ ...itemEditor, heightCm: v })}
+                  onChange={(v) =>
+                    setItemEditor({ ...itemEditor, heightCm: v })
+                  }
                   inputMode="numeric"
                 />
                 <LabeledInput
@@ -765,38 +1164,59 @@ export default function App() {
                   onChange={(v) => setItemEditor({ ...itemEditor, qty: v })}
                   inputMode="numeric"
                 />
+              </div>
 
+              {/* Row 2: profile / unitPrice / location */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                 <LabeledSelect
                   label="פרופיל"
                   value={activeProfileId ?? ""}
                   onChange={(id) => setActiveProfileId(id || undefined)}
-                  options={[{ label: "— בחר/י —", value: "" }, ...state.profiles.map((p) => ({ label: p.name, value: p.id }))]}
+                  options={[
+                    { label: "— בחר/י —", value: "" },
+                    ...state.profiles.map((p) => ({
+                      label: p.name,
+                      value: p.id,
+                    })),
+                  ]}
                 />
                 <LabeledInput
                   label="מחיר למ״ר"
                   value={itemEditor.unitPrice}
-                  onChange={(v) => setItemEditor({ ...itemEditor, unitPrice: v })}
+                  onChange={(v) =>
+                    setItemEditor({ ...itemEditor, unitPrice: v })
+                  }
                   inputMode="numeric"
                 />
                 <LabeledInput
                   label="מיקום"
                   value={itemEditor.location || ""}
-                  onChange={(v) => setItemEditor({ ...itemEditor, location: v })}
+                  onChange={(v) =>
+                    setItemEditor({ ...itemEditor, location: v })
+                  }
                 />
               </div>
 
+              {/* Row 3: details + addons */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
                 <LabeledInput
                   label="פרטים"
                   value={itemEditor.details || ""}
-                  onChange={(v) => setItemEditor({ ...itemEditor, details: v })}
+                  onChange={(v) =>
+                    setItemEditor({ ...itemEditor, details: v })
+                  }
                 />
 
                 <div>
-                  <div className="text-sm font-medium mb-2">תוספות (מחיר ליח׳)</div>
+                  <div className="text-sm font-medium mb-2">
+                    תוספות (מחיר ליח׳)
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {itemEditor.addons.map((a, idx) => (
-                      <div key={a.id} className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1">
+                      <div
+                        key={a.id}
+                        className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1"
+                      >
                         <label className="flex items-center gap-1">
                           <input
                             type="checkbox"
@@ -804,7 +1224,10 @@ export default function App() {
                             onChange={(e) => {
                               const next = [...itemEditor.addons];
                               next[idx] = { ...a, checked: e.target.checked };
-                              setItemEditor({ ...itemEditor, addons: next });
+                              setItemEditor({
+                                ...itemEditor,
+                                addons: next,
+                              });
                             }}
                           />
                           <span className="text-sm">{a.name}</span>
@@ -818,7 +1241,10 @@ export default function App() {
                           onChange={(e) => {
                             const next = [...itemEditor.addons];
                             next[idx] = { ...a, price: e.target.value };
-                            setItemEditor({ ...itemEditor, addons: next });
+                            setItemEditor({
+                              ...itemEditor,
+                              addons: next,
+                            });
                           }}
                         />
                       </div>
@@ -828,15 +1254,25 @@ export default function App() {
               </div>
 
               {/* Stats row */}
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2 text-sm">
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 text-sm">
                 <Stat label="שטח (מ״ר)" value={fmtNumber.format(liveArea)} />
-                <Stat label="תוס׳ ליח׳" value={fmtCurrency.format(liveAddonsSumPerItem)} />
-                <Stat label="מחיר ליח׳" value={fmtCurrency.format(livePerItemPrice)} />
+                <Stat
+                  label="תוס׳ ליח׳"
+                  value={fmtCurrency.format(liveAddonsSumPerItem)}
+                />
+                <Stat
+                  label="מחיר ליח׳"
+                  value={fmtCurrency.format(livePerItemPrice)}
+                />
                 <Stat label="כמות" value={fmtNumber.format(liveQty)} />
-                <Stat label="סה״כ לפריט" value={fmtCurrency.format(liveLineSubtotal)} highlight />
+                <Stat
+                  label="סה״כ לפריט"
+                  value={fmtCurrency.format(liveLineSubtotal)}
+                  highlight
+                />
               </div>
 
-              {/* Buttons (only what you asked to keep here) */}
+              {/* Only add-item + settings here */}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
@@ -844,17 +1280,22 @@ export default function App() {
                 >
                   הוסף להצעה
                 </button>
-                <button className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50" onClick={openSettings}>
+                <button
+                  className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
+                  onClick={openSettings}
+                >
                   הגדרות
                 </button>
               </div>
             </section>
 
-            {/* Items Table */}
-            <section className="card p-4">
+            {/* Items Table + totals + save/export */}
+            <section className="card p-4 w-full">
               <div className="flex items-center justify-between gap-2 mb-3">
                 <h2 className="text-lg font-semibold">פריטי ההצעה</h2>
-                <div className="text-sm text-slate-600">הטבלה נגללת אופקית במסכים קטנים</div>
+                <div className="text-sm text-slate-600">
+                  הטבלה נגללת אופקית במסכים קטנים
+                </div>
               </div>
               <div className="table-scroll">
                 <table className="table-inner-min w-full text-sm">
@@ -873,7 +1314,10 @@ export default function App() {
                   <tbody>
                     {state.current.items.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="text-center py-6 text-slate-500">
+                        <td
+                          colSpan={8}
+                          className="text-center py-6 text-slate-500"
+                        >
                           אין פריטים עדיין
                         </td>
                       </tr>
@@ -882,23 +1326,45 @@ export default function App() {
                         const w = parseLooseNumber(it.widthCm);
                         const h = parseLooseNumber(it.heightCm);
                         const area = (w * h) / 10000;
-                        const addonsSum = it.addons.reduce((s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+                        const addonsSum = it.addons.reduce(
+                          (s, a) =>
+                            s + (a.checked ? parseLooseNumber(a.price) : 0),
+                          0
+                        );
                         const unit = parseLooseNumber(it.unitPrice);
                         const perItem = area * unit + addonsSum;
-                        const qty = Math.max(0, parseLooseNumber(it.qty));
+                        const qty = Math.max(
+                          0,
+                          parseLooseNumber(it.qty)
+                        );
                         const total = perItem * qty;
 
-                        const addonsText = it.addons.filter(a => a.checked).map(a => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`).join(" • ");
+                        const addonsText = it.addons
+                          .filter((a) => a.checked)
+                          .map((a) =>
+                            `${a.name} (${fmtCurrency.format(
+                              parseLooseNumber(a.price)
+                            )})`
+                          )
+                          .join(" • ");
 
                         return (
                           <tr key={it.id} className="border-b">
                             <Td>{idx + 1}</Td>
-                            <Td>{`${fmtNumber.format(w)}×${fmtNumber.format(h)}`}</Td>
+                            <Td>{`${fmtNumber.format(w)}×${fmtNumber.format(
+                              h
+                            )}`}</Td>
                             <Td>{it.location || ""}</Td>
-                            <Td>{[it.details, addonsText].filter(Boolean).join(" — ")}</Td>
+                            <Td>
+                              {[it.details, addonsText]
+                                .filter(Boolean)
+                                .join(" — ")}
+                            </Td>
                             <Td>{fmtCurrency.format(perItem)}</Td>
                             <Td>{fmtNumber.format(qty)}</Td>
-                            <Td className="font-medium">{fmtCurrency.format(total)}</Td>
+                            <Td className="font-medium">
+                              {fmtCurrency.format(total)}
+                            </Td>
                             <Td>
                               <button
                                 className="text-red-600 hover:underline"
@@ -916,34 +1382,28 @@ export default function App() {
                 </table>
               </div>
 
-              {/* Totals row + (moved here) action buttons */}
-              <div className="mt-4 grid gap-3">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <label className="text-sm">מע״מ (% או עשרוני):</label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
-                      value={state.current.taxPercentText}
-                      onChange={(e) => updateCurrent("taxPercentText", e.target.value)}
-                    />
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-sm">
-                    <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
-                    <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
-                    <Stat label="סה״כ לתשלום" value={fmtCurrency.format(grandTotal)} highlight />
-                  </div>
+              {/* Totals row */}
+              <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm">מע״מ (% או עשרוני):</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
+                    value={state.current.taxPercentText}
+                    onChange={(e) =>
+                      updateCurrent("taxPercentText", e.target.value)
+                    }
+                  />
                 </div>
-
-                {/* Per your request: keep "שמור הצעה" + "ייצוא ל-PDF" HERE */}
-                <div className="flex flex-wrap gap-2 justify-end">
-                  <button className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95" onClick={saveQuote}>
-                    שמור הצעה
-                  </button>
-                  <button className="px-4 py-2 rounded-lg bg-emerלד-600 text-white hover:opacity-95" onClick={generateAndExportPDF}>
-                    ייצוא ל-PDF
-                  </button>
+                <div className="grid grid-cols-3 gap-3 text-sm">
+                  <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
+                  <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
+                  <Stat
+                    label="סה״כ לתשלום"
+                    value={fmtCurrency.format(grandTotal)}
+                    highlight
+                  />
                 </div>
               </div>
 
@@ -955,6 +1415,22 @@ export default function App() {
                   onChange={(v) => updateCurrent("notes", v)}
                 />
               </div>
+
+              {/* Final actions: save + export */}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95"
+                  onClick={saveQuote}
+                >
+                  שמור הצעה
+                </button>
+                <button
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:opacity-95"
+                  onClick={generateAndExportPDF}
+                >
+                  ייצוא ל-PDF
+                </button>
+              </div>
             </section>
           </section>
         ) : (
@@ -962,31 +1438,9 @@ export default function App() {
             customers={state.customers}
             quotes={state.quotes}
             onOpenLast={openLastQuoteForCustomer}
-            onNewFor={(c) => {
-              // "הזמנה חדשה" / start a clean quote for this customer
-              setState((s) => ({
-                ...s,
-                ui: { ...s.ui, tab: "quote" },
-                current: {
-                  ...s.current,
-                  customerName: c.name,
-                  customerPhone: c.phone ?? "",
-                  customerEmail: c.email ?? "",
-                  customerNotes: c.notes ?? "",
-                  items: [],
-                },
-              }));
-              setItemEditor(initItemEditor());
-            }}
-            onExportLast={(c) => exportLastForCustomer(c.id)}
-            onDeleteCustomer={(c) => {
-              if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
-              setState((s) => ({
-                ...s,
-                customers: s.customers.filter((x) => x.id !== c.id),
-                quotes: s.quotes.filter((q) => q.customerId !== c.id),
-              }));
-            }}
+            onCreateNewOrder={startNewEmptyQuote}
+            onExportPdf={exportLastQuoteForCustomer}
+            onDeleteCustomer={deleteCustomer}
           />
         )}
 
@@ -995,32 +1449,48 @@ export default function App() {
           <Modal onClose={closeSettings} title="הגדרות — ניהול פרופילים">
             <div className="modal-body p-4 space-y-4">
               <div className="text-sm text-slate-600">
-                הוספה/עריכה של פרופילים (4300, 7300 וכו׳) עם מחיר למ״ר. מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
+                הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר. הדיאלוג
+                מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <LabeledInput
                   label="שם פרופיל"
                   value={profileDraft.name}
-                  onChange={(v) => setProfileDraft({ ...profileDraft, name: v })}
+                  onChange={(v) =>
+                    setProfileDraft({ ...profileDraft, name: v })
+                  }
                 />
                 <LabeledInput
                   label="מחיר למ״ר"
                   value={profileDraft.unitPrice}
-                  onChange={(v) => setProfileDraft({ ...profileDraft, unitPrice: v })}
+                  onChange={(v) =>
+                    setProfileDraft({ ...profileDraft, unitPrice: v })
+                  }
                   inputMode="numeric"
                 />
                 <div className="flex items-end gap-2">
                   {profileDraft.id ? (
-                    <button className="px-3 py-2 rounded-lg bg-sky-500 text-white" onClick={saveProfileEdit}>
+                    <button
+                      className="px-3 py-2 rounded-lg bg-sky-500 text-white"
+                      onClick={saveProfileEdit}
+                    >
                       שמירת עריכה
                     </button>
                   ) : (
-                    <button className="px-3 py-2 rounded-lg bg-sky-500 text-white" onClick={addProfile}>
+                    <button
+                      className="px-3 py-2 rounded-lg bg-sky-500 text-white"
+                      onClick={addProfile}
+                    >
                       הוספת פרופיל
                     </button>
                   )}
-                  <button className="px-3 py-2 rounded-lg bg-white border" onClick={() => setProfileDraft({ name: "", unitPrice: "" })}>
+                  <button
+                    className="px-3 py-2 rounded-lg bg-white border"
+                    onClick={() =>
+                      setProfileDraft({ name: "", unitPrice: "" })
+                    }
+                  >
                     ניקוי
                   </button>
                 </div>
@@ -1038,7 +1508,10 @@ export default function App() {
                   <tbody>
                     {state.profiles.length === 0 ? (
                       <tr>
-                        <td colSpan={3} className="py-6 text-center text-slate-500">
+                        <td
+                          colSpan={3}
+                          className="py-6 text-center text-slate-500"
+                        >
                           אין פרופילים
                         </td>
                       </tr>
@@ -1049,10 +1522,16 @@ export default function App() {
                           <Td>{fmtCurrency.format(p.unitPrice)}</Td>
                           <Td>
                             <div className="flex flex-wrap gap-2">
-                              <button className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50" onClick={() => editProfile(p)}>
+                              <button
+                                className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50"
+                                onClick={() => editProfile(p)}
+                              >
                                 עריכה
                               </button>
-                              <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => deleteProfile(p.id)}>
+                              <button
+                                className="px-3 py-1.5 rounded-md bg-red-600 text-white"
+                                onClick={() => deleteProfile(p.id)}
+                              >
                                 מחיקה
                               </button>
                             </div>
@@ -1065,7 +1544,10 @@ export default function App() {
               </div>
             </div>
             <div className="p-3 border-t flex flex-wrap gap-2">
-              <button className="px-4 py-2 rounded-lg bg-slate-800 text-white" onClick={closeSettings}>
+              <button
+                className="px-4 py-2 rounded-lg bg-slate-800 text-white"
+                onClick={closeSettings}
+              >
                 סגירה
               </button>
             </div>
@@ -1123,9 +1605,21 @@ function LabeledSelect(props: {
   );
 }
 
-function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function Stat({
+  label,
+  value,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+}) {
   return (
-    <div className={`rounded-lg border px-3 py-2 ${highlight ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"}`}>
+    <div
+      className={`rounded-lg border px-3 py-2 ${
+        highlight ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"
+      }`}
+    >
       <div className="text-xs text-slate-500">{label}</div>
       <div className="text-sm font-medium">{value}</div>
     </div>
@@ -1133,33 +1627,50 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th className="text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap">{children}</th>;
+  return (
+    <th className="text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap">
+      {children}
+    </th>
+  );
 }
 function Td({ children }: { children: React.ReactNode }) {
-  return <td className="text-right px-3 py-2 align-top whitespace-nowrap">{children}</td>;
+  return (
+    <td className="text-right px-3 py-2 align-top whitespace-nowrap">
+      {children}
+    </td>
+  );
 }
 
-/** Customers Page (simplified: no count column, no edit/new buttons, add export + new order) */
+/** Customers Page */
 function CustomersPage(props: {
   customers: Customer[];
   quotes: Quote[];
   onOpenLast: (customerId: string) => void;
-  onNewFor: (c: Customer) => void;         // "הזמנה חדשה"
-  onExportLast: (c: Customer) => void;     // Export last PDF directly
-  onDeleteCustomer: (c: Customer) => void;
+  onCreateNewOrder: () => void;
+  onExportPdf: (customerId: string) => void;
+  onDeleteCustomer: (customerId: string) => void;
 }) {
   const latestMap = useMemo(() => {
     const grouped: Record<string, Quote[]> = {};
     for (const q of props.quotes) (grouped[q.customerId] ||= []).push(q);
     const latest: Record<string, Quote> = {};
-    for (const id in grouped) latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
+    for (const id in grouped)
+      latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
     return latest;
   }, [props.quotes]);
 
   return (
-    <section className="grid gap-4 px-2">
-      <div className="card p-4">
-        <h2 className="text-lg font-semibold mb-3">לקוחות</h2>
+    <section className="grid gap-4">
+      <div className="card p-4 w-full">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <h2 className="text-lg font-semibold">לקוחות</h2>
+          <button
+            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
+            onClick={props.onCreateNewOrder}
+          >
+            הזמנה חדשה
+          </button>
+        </div>
 
         {/* Mobile: cards */}
         <div className="grid sm:hidden grid-cols-1 gap-3">
@@ -1174,23 +1685,35 @@ function CustomersPage(props: {
                     <div>
                       <div className="font-medium">{c.name}</div>
                       <div className="text-xs text-slate-600">
-                        {last ? `אחרונה: ${fmtDate.format(new Date(last.date))} • ${fmtCurrency.format(last.totals.grand)}` : "אין הצעה שמורה"}
+                        {last
+                          ? `הצעה אחרונה: ${fmtDate.format(
+                              new Date(last.date)
+                            )} • ${fmtCurrency.format(last.totals.grand)}`
+                          : "אין הצעה שמורה"}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
-                        הזמנה חדשה
-                      </button>
-                      <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                      <button
+                        className="px-3 py-1.5 rounded-md bg-sky-500 text-white"
+                        onClick={() => props.onOpenLast(c.id)}
+                      >
                         פתח הצעה
                       </button>
-                      <button className="px-3 py-1.5 rounded-md bg-emerald-600 text-white" onClick={() => props.onExportLast(c)}>
-                        ייצוא PDF
-                      </button>
-                      <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
-                        מחיקה
+                      <button
+                        className="px-3 py-1.5 rounded-md bg-white border"
+                        onClick={() => props.onExportPdf(c.id)}
+                      >
+                        ייצוא ל-PDF
                       </button>
                     </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      className="px-3 py-1.5 rounded-md bg-red-600 text-white"
+                      onClick={() => props.onDeleteCustomer(c.id)}
+                    >
+                      מחיקה
+                    </button>
                   </div>
                 </div>
               );
@@ -1198,7 +1721,7 @@ function CustomersPage(props: {
           )}
         </div>
 
-        {/* Desktop: table (simplified columns) */}
+        {/* Desktop: table */}
         <div className="hidden sm:block table-scroll mt-2">
           <table className="table-inner-min w-full text-sm">
             <thead className="bg-slate-50">
@@ -1214,7 +1737,10 @@ function CustomersPage(props: {
             <tbody>
               {props.customers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-6 text-center text-slate-500">
+                  <td
+                    colSpan={6}
+                    className="py-6 text-center text-slate-500"
+                  >
                     אין לקוחות עדיין
                   </td>
                 </tr>
@@ -1227,19 +1753,27 @@ function CustomersPage(props: {
                       <Td>{c.phone ?? ""}</Td>
                       <Td>{c.email ?? ""}</Td>
                       <Td>{last ? fmtDate.format(new Date(last.date)) : ""}</Td>
-                      <Td>{last ? fmtCurrency.format(last.totals.grand) : ""}</Td>
+                      <Td>
+                        {last ? fmtCurrency.format(last.totals.grand) : ""}
+                      </Td>
                       <Td>
                         <div className="flex flex-wrap gap-2">
-                          <button className="px-3 py-1.5 rounded-md bg-white border" onClick={() => props.onNewFor(c)}>
-                            הזמנה חדשה
-                          </button>
-                          <button className="px-3 py-1.5 rounded-md bg-sky-500 text-white" onClick={() => props.onOpenLast(c.id)}>
+                          <button
+                            className="px-3 py-1.5 rounded-md bg-sky-500 text-white"
+                            onClick={() => props.onOpenLast(c.id)}
+                          >
                             פתח הצעה
                           </button>
-                          <button className="px-3 py-1.5 rounded-md bg-emerald-600 text-white" onClick={() => props.onExportLast(c)}>
-                            ייצוא PDF
+                          <button
+                            className="px-3 py-1.5 rounded-md bg-white border"
+                            onClick={() => props.onExportPdf(c.id)}
+                          >
+                            ייצוא ל-PDF
                           </button>
-                          <button className="px-3 py-1.5 rounded-md bg-red-600 text-white" onClick={() => props.onDeleteCustomer(c)}>
+                          <button
+                            className="px-3 py-1.5 rounded-md bg-red-600 text-white"
+                            onClick={() => props.onDeleteCustomer(c.id)}
+                          >
                             מחיקה
                           </button>
                         </div>
@@ -1257,7 +1791,15 @@ function CustomersPage(props: {
 }
 
 /** Modal (phone-safe constraints + internal scroll + wrapped buttons) */
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onEsc);
@@ -1265,11 +1807,20 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   }, [onClose]);
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
       <div className="modal-panel card" onClick={(e) => e.stopPropagation()}>
         <div className="px-4 py-3 border-b flex items-center justify-between">
           <h3 className="text-base font-semibold">{title}</h3>
-          <button className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50" onClick={onClose} aria-label="סגירה">
+          <button
+            className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50"
+            onClick={onClose}
+            aria-label="סגירה"
+          >
             ✕
           </button>
         </div>
