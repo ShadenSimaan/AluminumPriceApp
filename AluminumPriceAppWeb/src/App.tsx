@@ -132,7 +132,7 @@ const DEFAULT_STATE: AppState = {
     customerNotes: "",
     title: "הצעת מחיר",
     items: [],
-    taxPercentText: "17",
+    taxPercentText: "18",
     notes: "",
   },
   ui: { tab: "quote", settingsOpen: false },
@@ -163,7 +163,7 @@ function hydrateState(): AppState {
       customerNotes: String(currentRaw.customerNotes ?? ""),
       title: String(currentRaw.title ?? "הצעת מחיר"),
       items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
-      taxPercentText: String(currentRaw.taxPercentText ?? "17"),
+      taxPercentText: String(currentRaw.taxPercentText ?? "18"),
       notes: String(currentRaw.notes ?? ""),
     };
 
@@ -233,7 +233,7 @@ export default function App() {
 
   /** ======= Derived values & helpers ======= */
   const taxDecimal = normalizeTaxPercent(
-    parseLooseNumber(state.current?.taxPercentText ?? "17")
+    parseLooseNumber(state.current?.taxPercentText ?? "18")
   );
   const subTotal = useMemo(
     () => state.current.items.reduce((a, it) => a + it.subtotal, 0),
@@ -406,7 +406,7 @@ export default function App() {
       title: state.current.title || "הצעת מחיר",
       date: Date.now(),
       items: state.current.items,
-      taxPercent: parseLooseNumber(state.current.taxPercentText ?? "17"),
+      taxPercent: parseLooseNumber(state.current.taxPercentText ?? "18"),
       totals: { sub: subTotal, tax: taxValue, grand: grandTotal },
     };
 
@@ -438,7 +438,7 @@ export default function App() {
         customerNotes: customer.notes ?? "",
         items: q.items.map((it) => ({ ...it, id: uuid() })), // clone
         title: q.title,
-        taxPercentText: String(q.taxPercent ?? "17"),
+        taxPercentText: String(q.taxPercent ?? "18"),
         notes: s.current.notes,
       },
     }));
@@ -490,7 +490,7 @@ const handleExportPdf = async () => {
     customerPhone: state.current.customerPhone,
     customerEmail: state.current.customerEmail,
     notes: state.current.notes,
-    taxPercentText: state.current.taxPercentText ?? "17",
+    taxPercentText: state.current.taxPercentText ?? "18",
     items: state.current.items, // structurally compatible with PdfLineItem
   });
 };
