@@ -1,75 +1,14 @@
 // FILE: src/App.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { exportQuotePdf } from "./pdfExporter";
-
-/** =========================
- *  Types (per requirements)
- *  ========================= */
-type Customer = {
-  id: string;
-  name: string;
-  phone?: string;
-  email?: string;
-  notes?: string;
-  createdAt: number;
-};
-
-type Quote = {
-  id: string;
-  customerId: string;
-  title: string; // internal only (for filename)
-  date: number; // epoch ms
-  items: LineItem[];
-  taxPercent: number; // accepts 0.18 or 18
-  totals: { sub: number; tax: number; grand: number };
-};
-
-type Profile = {
-  id: string;
-  name: string;
-  unitPrice: number; // price per m²
-};
-
-type Addon = {
-  id: string;
-  name: string;
-  price: string; // text input (per item)
-  checked: boolean;
-};
-
-type LineItem = {
-  id: string;
-  widthCm: string; // text input
-  heightCm: string; // text input
-  qty: string; // text input
-  profileId?: string;
-  profileName?: string;
-  unitPrice: string; // from profile by default but editable
-  location?: string;
-  details?: string;
-  addons: Addon[];
-  subtotal: number; // computed
-};
-
-type AppState = {
-  customers: Customer[];
-  quotes: Quote[];
-  profiles: Profile[];
-  current: {
-    customerName: string;
-    customerPhone: string;
-    customerEmail: string;
-    customerNotes: string;
-    title: string;
-    items: LineItem[];
-    taxPercentText: string;
-    notes: string;
-  };
-  ui: {
-    tab: "quote" | "customers";
-    settingsOpen: boolean;
-  };
-};
+import {
+  AppState,
+  Customer,
+  LineItem,
+  Profile,
+} from "./types";
+import QuotePage from "./QuotePage";
+import CustomersPage from "./CustomersPage";
 
 /** =========================
  *  Constants & Utilities
@@ -100,27 +39,35 @@ function normalizeTaxPercent(n: number): number {
   return n;
 }
 
-const fmtNumber = new Intl.NumberFormat("he-IL", { maximumFractionDigits: 2 });
 const fmtCurrency = new Intl.NumberFormat("he-IL", {
   style: "currency",
   currency: "ILS",
 });
-const fmtDate = new Intl.DateTimeFormat("he-IL", { dateStyle: "medium" });
 
 const defaultProfiles: Profile[] = [
-  { id: uuid(), name: "4300", unitPrice: 520 },
-  { id: uuid(), name: "5600", unitPrice: 590 },
-  { id: uuid(), name: "7300", unitPrice: 690 },
-  { id: uuid(), name: "7600", unitPrice: 740 },
+  { id: uuid(), name: "1700 זכוכית ורשת", unitPrice: 1100 },
+  { id: uuid(), name: "1700 זכוכית ורשת ותריס אור", unitPrice: 2200 },
+
+  { id: uuid(), name: "7300 זכוכית ורשת", unitPrice: 1800 },
+  { id: uuid(), name: "7300 זכוכית ורשת ותריס אור", unitPrice: 2600 },
+  
+  { id: uuid(), name: "4300 זכוכית ורשת", unitPrice: 1100 },
+  { id: uuid(), name: "4300 זכוכית ורשת ותריס אור", unitPrice: 2300 },
+
+  { id: uuid(), name: "7600 זכוכית", unitPrice: 3000 },
+  { id: uuid(), name: "7600 זכוכית ותריס אור", unitPrice: 3800 },
+  
+  { id: uuid(), name: "5600 כנף ורשת", unitPrice: 1700 },
+  { id: uuid(), name: "5600 כנף ורשת ותריס אור", unitPrice: 2700 },
 ];
 
-const defaultAddonsPreset: Addon[] = [
-  { id: uuid(), name: "רשת", price: "80", checked: false },
-  { id: uuid(), name: "פרזול איכותי", price: "120", checked: false },
-  { id: uuid(), name: "תריס גלילה", price: "0", checked: false },
+const defaultAddonsPreset = [
+  { id: uuid(), name: "מנגנון דרי קיף", price: "650", checked: false },
+  { id: uuid(), name: "מנוע חשמלי סמפי/נייס", price: "800", checked: false },
+  { id: uuid(), name: "מנוע סיני", price: "300", checked: false },
 ];
 
-/** ===== Default state (used for migration/fallback) ===== */
+/** ===== Default state ===== */
 const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
@@ -190,23 +137,27 @@ export default function App() {
 
   /** ======= Item Editor (inline calculator) ======= */
   function initItemEditor(): LineItem {
+    const defaultProfile = state.profiles[0];
     return {
       id: uuid(),
       widthCm: "",
       heightCm: "",
       qty: "1",
-      profileId: undefined,
-      profileName: "",
-      unitPrice: "0",
+      profileId: defaultProfile?.id,
+      profileName: defaultProfile?.name ?? "",
+      unitPrice: defaultProfile ? String(defaultProfile.unitPrice) : "0",
       location: "",
       details: "",
       addons: defaultAddonsPreset.map((a) => ({ ...a })),
       subtotal: 0,
     };
   }
-  const [itemEditor, setItemEditor] = useState<LineItem>(initItemEditor());
+
+  const [itemEditor, setItemEditor] = useState<LineItem>(() =>
+    initItemEditor()
+  );
   const [activeProfileId, setActiveProfileId] = useState<string | undefined>(
-    undefined
+    state.profiles[0]?.id
   );
 
   // Persist on change (autosave)
@@ -214,13 +165,15 @@ export default function App() {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
 
-  // Initialize default selected profile once after load (if exists)
+  // Keep active profile valid when profiles change
   useEffect(() => {
-    setActiveProfileId(
-      (prev) => prev ?? (state.profiles[0]?.id ?? undefined)
-    );
+    setActiveProfileId((prev) => {
+      if (prev && state.profiles.some((p) => p.id === prev)) return prev;
+      return state.profiles[0]?.id ?? undefined;
+    });
   }, [state.profiles]);
 
+  // When active profile changes, sync to item editor (name + price)
   useEffect(() => {
     const p = state.profiles.find((p) => p.id === activeProfileId);
     setItemEditor((e) => ({
@@ -231,46 +184,6 @@ export default function App() {
     }));
   }, [activeProfileId, state.profiles]);
 
-  /** ======= Derived values & helpers ======= */
-  const taxDecimal = normalizeTaxPercent(
-    parseLooseNumber(state.current?.taxPercentText ?? "18")
-  );
-  const subTotal = useMemo(
-    () => state.current.items.reduce((a, it) => a + it.subtotal, 0),
-    [state.current.items]
-  );
-  const taxValue = subTotal * taxDecimal;
-  const grandTotal = subTotal + taxValue;
-
-  const liveArea = useMemo(() => {
-    const w = parseLooseNumber(itemEditor.widthCm);
-    const h = parseLooseNumber(itemEditor.heightCm);
-    return (w * h) / 10000;
-  }, [itemEditor.widthCm, itemEditor.heightCm]);
-
-  const liveAddonsSumPerItem = useMemo(
-    () =>
-      itemEditor.addons.reduce(
-        (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
-        0
-      ),
-    [itemEditor.addons]
-  );
-
-  const livePerItemPrice = useMemo(() => {
-    const unit = parseLooseNumber(itemEditor.unitPrice);
-    return liveArea * unit + liveAddonsSumPerItem;
-  }, [liveArea, itemEditor.unitPrice, liveAddonsSumPerItem]);
-
-  const liveQty = useMemo(
-    () => Math.max(0, parseLooseNumber(itemEditor.qty)),
-    [itemEditor.qty]
-  );
-  const liveLineSubtotal = useMemo(
-    () => livePerItemPrice * liveQty,
-    [livePerItemPrice, liveQty]
-  );
-
   function updateCurrent<K extends keyof AppState["current"]>(
     key: K,
     val: AppState["current"][K]
@@ -278,16 +191,16 @@ export default function App() {
     setState((s) => ({ ...s, current: { ...s.current, [key]: val } }));
   }
 
-  function addItem(currentDraft?: Partial<LineItem>) {
-    const widthCm = currentDraft?.widthCm ?? "";
-    const heightCm = currentDraft?.heightCm ?? "";
-    const qtyText = currentDraft?.qty ?? "";
-    const unitPriceText = currentDraft?.unitPrice ?? "0";
+  function addItem(currentDraft: LineItem) {
+    const widthCm = currentDraft.widthCm ?? "";
+    const heightCm = currentDraft.heightCm ?? "";
+    const qtyText = currentDraft.qty ?? "";
+    const unitPriceText = currentDraft.unitPrice ?? "0";
     const w = parseLooseNumber(widthCm);
     const h = parseLooseNumber(heightCm);
     const qty = Math.max(0, parseLooseNumber(qtyText));
     const area = (w * h) / 10000; // m²
-    const addonsPerItem = (currentDraft?.addons ?? []).reduce(
+    const addonsPerItem = (currentDraft.addons ?? []).reduce(
       (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
       0
     );
@@ -300,12 +213,12 @@ export default function App() {
       widthCm,
       heightCm,
       qty: qtyText,
-      profileId: currentDraft?.profileId,
-      profileName: currentDraft?.profileName,
+      profileId: currentDraft.profileId,
+      profileName: currentDraft.profileName,
       unitPrice: unitPriceText,
-      location: currentDraft?.location ?? "",
-      details: currentDraft?.details ?? "",
-      addons: (currentDraft?.addons ?? []).map((a) => ({ ...a })),
+      location: currentDraft.location ?? "",
+      details: currentDraft.details ?? "",
+      addons: (currentDraft.addons ?? []).map((a) => ({ ...a })),
       subtotal,
     };
 
@@ -313,8 +226,9 @@ export default function App() {
       ...s,
       current: { ...s.current, items: [...s.current.items, item] },
     }));
-    // Clear editor after adding
+
     setItemEditor(initItemEditor());
+    alert("החלון נוסף בהצלחה");
   }
 
   function removeItem(id: string) {
@@ -345,10 +259,17 @@ export default function App() {
         title: "הצעת מחיר",
         items: [],
         notes: "",
+        taxPercentText: "18",
       },
     }));
     clearCurrentForm();
   }
+
+  // ✅ On app load: ALWAYS start with a fresh new quote (not old one)
+  useEffect(() => {
+    startNewEmptyQuote();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** ======= Customers + Quotes helpers ======= */
   function ensureCustomerByName(
@@ -388,6 +309,16 @@ export default function App() {
     return created;
   }
 
+  const subTotal = state.current.items.reduce(
+    (a, it) => a + it.subtotal,
+    0
+  );
+  const taxDecimal = normalizeTaxPercent(
+    parseLooseNumber(state.current.taxPercentText ?? "18")
+  );
+  const taxValue = subTotal * taxDecimal;
+  const grandTotal = subTotal + taxValue;
+
   function saveQuote() {
     if (!state.current.customerName.trim()) {
       alert("אנא הזן/י שם לקוח");
@@ -400,7 +331,7 @@ export default function App() {
       state.current.customerNotes
     );
 
-    const quote: Quote = {
+    const quote = {
       id: uuid(),
       customerId: customer.id,
       title: state.current.title || "הצעת מחיר",
@@ -410,7 +341,6 @@ export default function App() {
       totals: { sub: subTotal, tax: taxValue, grand: grandTotal },
     };
 
-    // Keep only one quote per customer (overwrite old)
     setState((s) => ({
       ...s,
       quotes: [...s.quotes.filter((q) => q.customerId !== customer.id), quote],
@@ -454,6 +384,28 @@ export default function App() {
     }));
   }
 
+  // ======== PDF EXPORT =========
+  const handleExportPdf = async () => {
+    if (!state.current.customerName.trim()) {
+      alert("אנא הזן/י שם לקוח לפני יצוא PDF");
+      return;
+    }
+    if (!state.current.items.length) {
+      alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
+      return;
+    }
+
+    await exportQuotePdf({
+      title: state.current.title || "הצעת מחיר",
+      customerName: state.current.customerName,
+      customerPhone: state.current.customerPhone,
+      customerEmail: state.current.customerEmail,
+      notes: state.current.notes,
+      taxPercentText: state.current.taxPercentText ?? "18",
+      items: state.current.items,
+    });
+  };
+
   // Export last quote for customer from לקוחות page
   function exportLastQuoteForCustomer(customerId: string) {
     const hasQuote = state.quotes.some((q) => q.customerId === customerId);
@@ -463,42 +415,11 @@ export default function App() {
     }
     openLastQuoteForCustomer(customerId);
     setTimeout(() => {
-      generateAndExportPDF();
+      handleExportPdf();
     }, 0);
   }
 
-
-  
-//===================================================================================================================================================================
-//===================================================================================================================================================================
-//===================================================================================================================================================================
-// ======== PDF EXPORT (REVERSED COLUMNS + CLEAN PRICES) ========
-
-const handleExportPdf = async () => {
-  if (!state.current.customerName.trim()) {
-    alert("אנא הזן/י שם לקוח לפני יצוא PDF");
-    return;
-  }
-  if (!state.current.items.length) {
-    alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
-    return;
-  }
-
-  await exportQuotePdf({
-    title: state.current.title || "הצעת מחיר",
-    customerName: state.current.customerName,
-    customerPhone: state.current.customerPhone,
-    customerEmail: state.current.customerEmail,
-    notes: state.current.notes,
-    taxPercentText: state.current.taxPercentText ?? "18",
-    items: state.current.items, // structurally compatible with PdfLineItem
-  });
-};
-
-//===================================================================================================================================================================
-//===================================================================================================================================================================
-//===================================================================================================================================================================
-/** ======= Settings dialog: profiles CRUD ======= */
+  /** ======= Settings dialog: profiles CRUD ======= */
   const [profileDraft, setProfileDraft] = useState<{
     id?: string;
     name: string;
@@ -583,7 +504,10 @@ const handleExportPdf = async () => {
                     : "hover:bg-slate-100"
                 }`}
                 onClick={() =>
-                  setState((s) => ({ ...s, ui: { ...s.ui, tab: "customers" } }))
+                  setState((s) => ({
+                    ...s,
+                    ui: { ...s.ui, tab: "customers" },
+                  }))
                 }
               >
                 לקוחות
@@ -612,344 +536,21 @@ const handleExportPdf = async () => {
           </div>
         )}
 
-        {/* Quote tab */}
+        {/* Pages */}
         {state.ui.tab === "quote" ? (
-          <section className="grid gap-4">
-            {/* Customer inline form */}
-            <section className="card p-4 w-full">
-              <h2 className="text-lg font-semibold mb-3">פרטי לקוח</h2>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <LabeledInput
-                  label="שם לקוח*"
-                  placeholder="חובה"
-                  value={state.current.customerName}
-                  onChange={(v) => updateCurrent("customerName", v)}
-                />
-                <LabeledInput
-                  label="טלפון"
-                  placeholder="אופציונלי"
-                  value={state.current.customerPhone}
-                  onChange={(v) => updateCurrent("customerPhone", v)}
-                  inputMode="tel"
-                />
-                <LabeledInput
-                  label="אימייל"
-                  placeholder="אופציונלי"
-                  value={state.current.customerEmail}
-                  onChange={(v) => updateCurrent("customerEmail", v)}
-                  inputMode="email"
-                />
-                <LabeledInput
-                  label="הערות ללקוח (לא חובה)"
-                  placeholder=""
-                  value={state.current.customerNotes}
-                  onChange={(v) => updateCurrent("customerNotes", v)}
-                />
-              </div>
-            </section>
-
-            {/* Calculator + Add item */}
-            <section className="card p-4 w-full">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                <h2 className="text-lg font-semibold">מחשבון פריט</h2>
-                <div className="text-sm text-slate-600">
-                  גובה הממשק מותאם לנייד (100vh אמיתי)
-                </div>
-              </div>
-
-              {/* Row 1: width / height / qty (no col-span tricks) */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-                <LabeledInput
-                  label="רוחב (ס״מ)"
-                  value={itemEditor.widthCm}
-                  onChange={(v) =>
-                    setItemEditor({ ...itemEditor, widthCm: v })
-                  }
-                  inputMode="numeric"
-                />
-                <LabeledInput
-                  label="גובה (ס״מ)"
-                  value={itemEditor.heightCm}
-                  onChange={(v) =>
-                    setItemEditor({ ...itemEditor, heightCm: v })
-                  }
-                  inputMode="numeric"
-                />
-                <LabeledInput
-                  label="כמות"
-                  value={itemEditor.qty}
-                  onChange={(v) => setItemEditor({ ...itemEditor, qty: v })}
-                  inputMode="numeric"
-                />
-              </div>
-
-              {/* Row 2: profile / unitPrice / location */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-                <LabeledSelect
-                  label="פרופיל"
-                  value={activeProfileId ?? ""}
-                  onChange={(id) => setActiveProfileId(id || undefined)}
-                  options={[
-                    { label: "— בחר/י —", value: "" },
-                    ...state.profiles.map((p) => ({
-                      label: p.name,
-                      value: p.id,
-                    })),
-                  ]}
-                />
-                <LabeledInput
-                  label="מחיר למ״ר"
-                  value={itemEditor.unitPrice}
-                  onChange={(v) =>
-                    setItemEditor({ ...itemEditor, unitPrice: v })
-                  }
-                  inputMode="numeric"
-                />
-                <LabeledInput
-                  label="מיקום"
-                  value={itemEditor.location || ""}
-                  onChange={(v) =>
-                    setItemEditor({ ...itemEditor, location: v })
-                  }
-                />
-              </div>
-
-              {/* Row 3: details + addons */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                <LabeledInput
-                  label="פרטים"
-                  value={itemEditor.details || ""}
-                  onChange={(v) =>
-                    setItemEditor({ ...itemEditor, details: v })
-                  }
-                />
-
-                <div>
-                  <div className="text-sm font-medium mb-2">
-                    תוספות (מחיר ליח׳)
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {itemEditor.addons.map((a, idx) => (
-                      <div
-                        key={a.id}
-                        className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1"
-                      >
-                        <label className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={a.checked}
-                            onChange={(e) => {
-                              const next = [...itemEditor.addons];
-                              next[idx] = { ...a, checked: e.target.checked };
-                              setItemEditor({
-                                ...itemEditor,
-                                addons: next,
-                              });
-                            }}
-                          />
-                          <span className="text-sm">{a.name}</span>
-                        </label>
-                        <input
-                          className="w-20 rounded-md bg-slate-50 border border-slate-200 px-2 py-1 text-sm"
-                          type="text"
-                          inputMode="numeric"
-                          placeholder="₪"
-                          value={a.price}
-                          onChange={(e) => {
-                            const next = [...itemEditor.addons];
-                            next[idx] = { ...a, price: e.target.value };
-                            setItemEditor({
-                              ...itemEditor,
-                              addons: next,
-                            });
-                          }}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Stats row */}
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 text-sm">
-                <Stat label="שטח (מ״ר)" value={fmtNumber.format(liveArea)} />
-                <Stat
-                  label="תוס׳ ליח׳"
-                  value={fmtCurrency.format(liveAddonsSumPerItem)}
-                />
-                <Stat
-                  label="מחיר ליח׳"
-                  value={fmtCurrency.format(livePerItemPrice)}
-                />
-                <Stat label="כמות" value={fmtNumber.format(liveQty)} />
-                <Stat
-                  label="סה״כ לפריט"
-                  value={fmtCurrency.format(liveLineSubtotal)}
-                  highlight
-                />
-              </div>
-
-              {/* Only add-item + settings here */}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
-                  onClick={() => addItem(itemEditor)}
-                >
-                  הוסף להצעה
-                </button>
-                <button
-                  className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
-                  onClick={openSettings}
-                >
-                  הגדרות
-                </button>
-              </div>
-            </section>
-
-            {/* Items Table + totals + save/export */}
-            <section className="card p-4 w-full">
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <h2 className="text-lg font-semibold">פריטי ההצעה</h2>
-                <div className="text-sm text-slate-600">
-                  הטבלה נגללת אופקית במסכים קטנים
-                </div>
-              </div>
-              <div className="table-scroll">
-                <table className="table-inner-min w-full text-sm">
-                  <thead>
-                    <tr className="border-b bg-slate-50">
-                      <Th>מס׳</Th>
-                      <Th>מידות (ס״מ)</Th>
-                      <Th>מיקום</Th>
-                      <Th>פרטים</Th>
-                      <Th>מחיר ליח׳</Th>
-                      <Th>כמות</Th>
-                      <Th>סה״כ</Th>
-                      <Th></Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {state.current.items.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={8}
-                          className="text-center py-6 text-slate-500"
-                        >
-                          אין פריטים עדיין
-                        </td>
-                      </tr>
-                    ) : (
-                      state.current.items.map((it, idx) => {
-                        const w = parseLooseNumber(it.widthCm);
-                        const h = parseLooseNumber(it.heightCm);
-                        const area = (w * h) / 10000;
-                        const addonsSum = it.addons.reduce(
-                          (s, a) =>
-                            s + (a.checked ? parseLooseNumber(a.price) : 0),
-                          0
-                        );
-                        const unit = parseLooseNumber(it.unitPrice);
-                        const perItem = area * unit + addonsSum;
-                        const qty = Math.max(
-                          0,
-                          parseLooseNumber(it.qty)
-                        );
-                        const total = perItem * qty;
-
-                        const addonsText = it.addons
-                          .filter((a) => a.checked)
-                          .map((a) =>
-                            `${a.name} (${fmtCurrency.format(
-                              parseLooseNumber(a.price)
-                            )})`
-                          )
-                          .join(" • ");
-
-                        return (
-                          <tr key={it.id} className="border-b">
-                            <Td>{idx + 1}</Td>
-                            <Td>{`${fmtNumber.format(w)}×${fmtNumber.format(
-                              h
-                            )}`}</Td>
-                            <Td>{it.location || ""}</Td>
-                            <Td>
-                              {[it.details, addonsText]
-                                .filter(Boolean)
-                                .join(" — ")}
-                            </Td>
-                            <Td>{fmtCurrency.format(perItem)}</Td>
-                            <Td>{fmtNumber.format(qty)}</Td>
-                            <Td className="font-medium">
-                              {fmtCurrency.format(total)}
-                            </Td>
-                            <Td>
-                              <button
-                                className="text-red-600 hover:underline"
-                                onClick={() => removeItem(it.id)}
-                                aria-label="מחק פריט"
-                              >
-                                מחיקה
-                              </button>
-                            </Td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Totals row */}
-              <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm">מע״מ (% או עשרוני):</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
-                    value={state.current.taxPercentText}
-                    onChange={(e) =>
-                      updateCurrent("taxPercentText", e.target.value)
-                    }
-                  />
-                </div>
-                <div className="grid grid-cols-3 gap-3 text-sm">
-                  <Stat label="מחיר" value={fmtCurrency.format(subTotal)} />
-                  <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
-                  <Stat
-                    label="סה״כ לתשלום"
-                    value={fmtCurrency.format(grandTotal)}
-                    highlight
-                  />
-                </div>
-              </div>
-
-              {/* Footer notes */}
-              <div className="mt-4">
-                <LabeledInput
-                  label="הערות למסמך (יופיעו ב-PDF)"
-                  value={state.current.notes}
-                  onChange={(v) => updateCurrent("notes", v)}
-                />
-              </div>
-
-              {/* Final actions: save + export */}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95"
-                  onClick={saveQuote}
-                >
-                  שמור הצעה
-                </button>
-                <button
-                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:opacity-95"
-                  onClick={handleExportPdf}
-                >
-                  ייצוא ל-PDF
-                </button>
-              </div>
-            </section>
-          </section>
+          <QuotePage
+            state={state}
+            itemEditor={itemEditor}
+            activeProfileId={activeProfileId}
+            updateCurrent={updateCurrent}
+            setItemEditor={setItemEditor}
+            setActiveProfileId={setActiveProfileId}
+            openSettings={openSettings}
+            onAddItem={() => addItem(itemEditor)}
+            onRemoveItem={removeItem}
+            onSaveQuote={saveQuote}
+            onExportPdf={handleExportPdf}
+          />
         ) : (
           <CustomersPage
             customers={state.customers}
@@ -966,19 +567,18 @@ const handleExportPdf = async () => {
           <Modal onClose={closeSettings} title="הגדרות — ניהול פרופילים">
             <div className="modal-body p-4 space-y-4">
               <div className="text-sm text-slate-600">
-                הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר. הדיאלוג
-                מותאם לנייד: רוחב/גובה מוגבלים וגלילה פנימית.
+                הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר.
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <LabeledInput
+                <SettingsInput
                   label="שם פרופיל"
                   value={profileDraft.name}
                   onChange={(v) =>
                     setProfileDraft({ ...profileDraft, name: v })
                   }
                 />
-                <LabeledInput
+                <SettingsInput
                   label="מחיר למ״ר"
                   value={profileDraft.unitPrice}
                   onChange={(v) =>
@@ -1017,9 +617,9 @@ const handleExportPdf = async () => {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-50">
                     <tr>
-                      <Th>שם</Th>
-                      <Th>מחיר למ״ר</Th>
-                      <Th>פעולות</Th>
+                      <ThSettings>שם</ThSettings>
+                      <ThSettings>מחיר למ״ר</ThSettings>
+                      <ThSettings>פעולות</ThSettings>
                     </tr>
                   </thead>
                   <tbody>
@@ -1035,9 +635,11 @@ const handleExportPdf = async () => {
                     ) : (
                       state.profiles.map((p) => (
                         <tr key={p.id} className="border-t">
-                          <Td>{p.name}</Td>
-                          <Td>{fmtCurrency.format(p.unitPrice)}</Td>
-                          <Td>
+                          <TdSettings>{p.name}</TdSettings>
+                          <TdSettings>
+                            {fmtCurrency.format(p.unitPrice)}
+                          </TdSettings>
+                          <TdSettings>
                             <div className="flex flex-wrap gap-2">
                               <button
                                 className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50"
@@ -1052,7 +654,7 @@ const handleExportPdf = async () => {
                                 מחיקה
                               </button>
                             </div>
-                          </Td>
+                          </TdSettings>
                         </tr>
                       ))
                     )}
@@ -1075,12 +677,11 @@ const handleExportPdf = async () => {
   );
 }
 
-/** ======= Small UI bits (inline) ======= */
-function LabeledInput(props: {
+/** Small UI bits for Settings dialog */
+function SettingsInput(props: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-  placeholder?: string;
   inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
 }) {
   return (
@@ -1090,7 +691,6 @@ function LabeledInput(props: {
         type="text"
         inputMode={props.inputMode}
         className="w-full rounded-md bg-white border border-slate-300 px-3 py-2"
-        placeholder={props.placeholder}
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
       />
@@ -1098,59 +698,14 @@ function LabeledInput(props: {
   );
 }
 
-function LabeledSelect(props: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { label: string; value: string }[];
-}) {
-  return (
-    <label className="grid gap-1.5 w-full">
-      <span className="text-sm text-slate-700">{props.label}</span>
-      <select
-        className="w-full rounded-md bg-white border border-slate-300 px-3 py-2"
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-      >
-        {props.options.map((o) => (
-          <option key={o.value + o.label} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  highlight,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-}) {
-  return (
-    <div
-      className={`rounded-lg border px-3 py-2 ${
-        highlight ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"
-      }`}
-    >
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-sm font-medium">{value}</div>
-    </div>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
+function ThSettings({ children }: { children: React.ReactNode }) {
   return (
     <th className="text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap">
       {children}
     </th>
   );
 }
-function Td({ children }: { children: React.ReactNode }) {
+function TdSettings({ children }: { children: React.ReactNode }) {
   return (
     <td className="text-right px-3 py-2 align-top whitespace-nowrap">
       {children}
@@ -1158,156 +713,7 @@ function Td({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Customers Page */
-function CustomersPage(props: {
-  customers: Customer[];
-  quotes: Quote[];
-  onOpenLast: (customerId: string) => void;
-  onCreateNewOrder: () => void;
-  onExportPdf: (customerId: string) => void;
-  onDeleteCustomer: (customerId: string) => void;
-}) {
-  const latestMap = useMemo(() => {
-    const grouped: Record<string, Quote[]> = {};
-    for (const q of props.quotes) (grouped[q.customerId] ||= []).push(q);
-    const latest: Record<string, Quote> = {};
-    for (const id in grouped)
-      latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
-    return latest;
-  }, [props.quotes]);
-
-  return (
-    <section className="grid gap-4">
-      <div className="card p-4 w-full">
-        <div className="flex items-center justify-between gap-2 mb-3">
-          <h2 className="text-lg font-semibold">לקוחות</h2>
-          <button
-            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
-            onClick={props.onCreateNewOrder}
-          >
-            הזמנה חדשה
-          </button>
-        </div>
-
-        {/* Mobile: cards */}
-        <div className="grid sm:hidden grid-cols-1 gap-3">
-          {props.customers.length === 0 ? (
-            <div className="text-slate-500 text-sm">אין לקוחות עדיין</div>
-          ) : (
-            props.customers.map((c) => {
-              const last = latestMap[c.id];
-              return (
-                <div key={c.id} className="rounded-xl border p-3 bg-white">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <div className="font-medium">{c.name}</div>
-                      <div className="text-xs text-slate-600">
-                        {last
-                          ? `הצעה אחרונה: ${fmtDate.format(
-                              new Date(last.date)
-                            )} • ${fmtCurrency.format(last.totals.grand)}`
-                          : "אין הצעה שמורה"}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        className="px-3 py-1.5 rounded-md bg-sky-500 text-white"
-                        onClick={() => props.onOpenLast(c.id)}
-                      >
-                        פתח הצעה
-                      </button>
-                      <button
-                        className="px-3 py-1.5 rounded-md bg-white border"
-                        onClick={() => props.onExportPdf(c.id)}
-                      >
-                        ייצוא ל-PDF
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <button
-                      className="px-3 py-1.5 rounded-md bg-red-600 text-white"
-                      onClick={() => props.onDeleteCustomer(c.id)}
-                    >
-                      מחיקה
-                    </button>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Desktop: table */}
-        <div className="hidden sm:block table-scroll mt-2">
-          <table className="table-inner-min w-full text-sm">
-            <thead className="bg-slate-50">
-              <tr>
-                <Th>שם</Th>
-                <Th>טלפון</Th>
-                <Th>אימייל</Th>
-                <Th>הצעה אחרונה</Th>
-                <Th>סכום אחרון</Th>
-                <Th>פעולות</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.customers.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="py-6 text-center text-slate-500"
-                  >
-                    אין לקוחות עדיין
-                  </td>
-                </tr>
-              ) : (
-                props.customers.map((c) => {
-                  const last = latestMap[c.id];
-                  return (
-                    <tr key={c.id} className="border-t">
-                      <Td>{c.name}</Td>
-                      <Td>{c.phone ?? ""}</Td>
-                      <Td>{c.email ?? ""}</Td>
-                      <Td>{last ? fmtDate.format(new Date(last.date)) : ""}</Td>
-                      <Td>
-                        {last ? fmtCurrency.format(last.totals.grand) : ""}
-                      </Td>
-                      <Td>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            className="px-3 py-1.5 rounded-md bg-sky-500 text-white"
-                            onClick={() => props.onOpenLast(c.id)}
-                          >
-                            פתח הצעה
-                          </button>
-                          <button
-                            className="px-3 py-1.5 rounded-md bg-white border"
-                            onClick={() => props.onExportPdf(c.id)}
-                          >
-                            ייצוא ל-PDF
-                          </button>
-                          <button
-                            className="px-3 py-1.5 rounded-md bg-red-600 text-white"
-                            onClick={() => props.onDeleteCustomer(c.id)}
-                          >
-                            מחיקה
-                          </button>
-                        </div>
-                      </Td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/** Modal (phone-safe constraints + internal scroll + wrapped buttons) */
+/** Modal */
 function Modal({
   title,
   onClose,

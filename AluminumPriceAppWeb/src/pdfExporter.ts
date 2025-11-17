@@ -23,6 +23,7 @@ export interface PdfLineItem {
   unitPrice: string;
   subtotal?: number;
   addons: PdfAddon[];
+  profileName?: string; // show profile in PDF table
 }
 
 export interface PdfQuotePayload {
@@ -36,6 +37,24 @@ export interface PdfQuotePayload {
 }
 
 // --- small helpers ---
+function makeSafeFilenameFromCustomer(customerName: string): string {
+  const baseName =
+    (customerName || "לקוח")
+      .trim()
+      // remove forbidden filename characters
+      .replace(/[<>:"/\\|?*]/g, " ")
+      // collapse spaces to single underscore
+      .replace(/\s+/g, "_") || "לקוח";
+
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const dateSlug = `${yyyy}-${mm}-${dd}`;
+
+  return `${baseName}_${dateSlug}.pdf`; // e.g. Shaden_2025-11-17.pdf
+}
+
 
 function parseLooseNumber(value: string | number | null | undefined): number {
   if (typeof value === "number") return isFinite(value) ? value : 0;
@@ -128,25 +147,42 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 async function androidSafeSave(doc: any, filename: string) {
-  const blob = doc.output("blob");
-  const url = URL.createObjectURL(blob);
-
   try {
-    const win = window.open(url, "_blank");
-    if (!win) {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    }
-  } catch {
-    doc.save(filename);
-  } finally {
+    const blob = doc.output("blob");
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename; // ← this is the name the user sees
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch {
+    // fallback
+    doc.save(filename);
   }
+}
+
+/**
+ * Fit a single-line text into a given width.
+ * If it's too long → truncate and add "…".
+ */
+function fitTextToWidth(doc: any, text: string, maxWidth: number): string {
+  if (!text) return "";
+  let current = text;
+  let width = doc.getTextWidth(current);
+  if (width <= maxWidth) return current;
+
+  // leave room for the ellipsis
+  const ellipsis = "…";
+  while (current.length > 0 && width > maxWidth) {
+    current = current.slice(0, -1);
+    width = doc.getTextWidth(current + ellipsis);
+  }
+  return current.length === 0 ? ellipsis : current + ellipsis;
 }
 
 // --------- MAIN PUBLIC API ---------
@@ -247,7 +283,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     marginBottom
   );
 
-  // ===== Totals box on LEFT, but text still RTL / right-aligned =====
+  // ===== Totals box on LEFT =====
   const sub = payload.items.reduce((sum, it) => {
     if (typeof it.subtotal === "number") return sum + it.subtotal;
     const w = parseLooseNumber(it.widthCm);
@@ -277,7 +313,6 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   doc.roundedRect(boxX, boxY, boxWidth, 96, 8, 8);
   boxY += 26;
 
-  // Note: text is still right-aligned inside the box (RTL)
   drawTextSmart(
     doc,
     `מחיר: ${formatMoneyPdf(sub)}`,
@@ -295,7 +330,6 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   );
   boxY += 24;
 
-  // highlighted grand total
   doc.setFillColor(236, 248, 255);
   doc.roundedRect(boxX + 10, boxY - 18, boxWidth - 20, 30, 6, 6, "F");
   doc.setFont(PDF_FONT_NAME, "bold");
@@ -308,7 +342,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   );
   doc.setFont(PDF_FONT_NAME, "normal");
 
-  // ===== Footer: anchored to bottom of last page =====
+  // ===== Footer =====
   const footerHeight = 80;
   const footerTop = pageHeight - marginBottom - footerHeight;
   let footerY = footerTop;
@@ -324,13 +358,9 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
 
   if (notes?.trim()) {
     const notesLabel = "הערות:";
-    drawTextSmart(
-      doc,
-      notesLabel,
-      pageWidth - marginX,
-      footerY,
-      { align: "right" }
-    );
+    drawTextSmart(doc, notesLabel, pageWidth - marginX, footerY, {
+      align: "right",
+    });
     footerY += 16;
 
     const notesWidth = pageWidth - marginX * 2;
@@ -347,13 +377,11 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     footerY += wrapped.length * 14 + 6;
   }
 
-  // Signature label
   footerY += 6;
   drawTextSmart(doc, "חתימה:", pageWidth - marginX, footerY, {
     align: "right",
   });
 
-  // Signature image – placed BELOW the text, with extra spacing
   try {
     const sigResp = await fetch("/fonts/signature.png");
     if (sigResp.ok) {
@@ -362,8 +390,8 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
 
       const sigWidth = 120;
       const sigHeight = 40;
-      const sigX = pageWidth - marginX - sigWidth; // right aligned
-      const sigY = footerY + 8; // a bit under the "חתימה:" text
+      const sigX = pageWidth - marginX - sigWidth;
+      const sigY = footerY + 8;
 
       doc.addImage(dataUrl, "PNG", sigX, sigY, sigWidth, sigHeight);
     }
@@ -372,11 +400,15 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   }
 
 
-  const filename = `${payload.title || "הצעת מחיר"}.pdf`;
+
+  // NEW:
+  const filename = makeSafeFilenameFromCustomer(customerName);
   await androidSafeSave(doc, filename);
 }
 
-// ---- internal: table drawing (columns are RTL, with wider מידות & מיקום) ----
+// ---- internal: table drawing ----
+// Columns from RIGHT to LEFT:
+// מס׳ | פרופיל | מידות | מיקום | פרטים | מחיר ליח׳ | כמות | סה״כ
 
 function drawItemsTable(
   doc: any,
@@ -391,34 +423,42 @@ function drawItemsTable(
   const right = pageWidth - marginX;
   const left = marginX;
 
-  // Columns from RIGHT to LEFT:
-  // מס׳ | מידות | מיקום | פרטים | מחיר ליח׳ | כמות | סה״כ
-  // Adjusted widths to avoid collisions:
+  // Total width ≈ 515pt, matches (right - left) so columns don't overlap
   const colWidths = {
     num: 25,
-    dims: 80,      // wider for מידות + values
-    location: 80,  // a bit wider
-    details: 140,  // slightly narrower
-    unitPrice: 75,
-    qty: 40,
-    total: 90,
-  }; // sum = 515
+    profile: 70,
+    dims: 65,
+    location: 70,
+    details: 130,
+    unitPrice: 60,
+    qty: 30,
+    total: 65,
+  };
+  // Sum: 25+55+65+70+120+70+35+75 = 515 ✅
 
   const colX = {
     num: right,
-    dims: right - colWidths.num,
-    location: right - colWidths.num - colWidths.dims,
+    profile: right - colWidths.num,
+    dims: right - colWidths.num - colWidths.profile,
+    location:
+      right - colWidths.num - colWidths.profile - colWidths.dims,
     details:
-      right - colWidths.num - colWidths.dims - colWidths.location,
+      right -
+      colWidths.num -
+      colWidths.profile -
+      colWidths.dims -
+      colWidths.location,
     unitPrice:
       right -
       colWidths.num -
+      colWidths.profile -
       colWidths.dims -
       colWidths.location -
       colWidths.details,
     qty:
       right -
       colWidths.num -
+      colWidths.profile -
       colWidths.dims -
       colWidths.location -
       colWidths.details -
@@ -426,6 +466,7 @@ function drawItemsTable(
     total:
       right -
       colWidths.num -
+      colWidths.profile -
       colWidths.dims -
       colWidths.location -
       colWidths.details -
@@ -452,13 +493,12 @@ function drawItemsTable(
 
     doc.setFont(PDF_FONT_NAME, "bold");
     drawTextSmart(doc, "מס׳", colX.num - 4, centerY, { align: "right" });
-    drawTextSmart(
-      doc,
-      "מדוית )ס״מ(",
-      colX.dims - 4,
-      centerY,
-      { align: "right" }
-    );
+    drawTextSmart(doc, "פרופיל", colX.profile - 4, centerY, {
+      align: "right",
+    });
+    drawTextSmart(doc, "מידות )ס״מ(", colX.dims - 4, centerY, {
+      align: "right",
+    });
     drawTextSmart(doc, "מיקום", colX.location - 4, centerY, {
       align: "right",
     });
@@ -485,6 +525,7 @@ function drawItemsTable(
 
     const xs = [
       colX.num - colWidths.num,
+      colX.profile - colWidths.profile,
       colX.dims - colWidths.dims,
       colX.location - colWidths.location,
       colX.details - colWidths.details,
@@ -503,8 +544,7 @@ function drawItemsTable(
   items.forEach((it, idx) => {
     const w = parseLooseNumber(it.widthCm);
     const h = parseLooseNumber(it.heightCm);
-    // show clean integers for מידות to keep it short (no .00)
-    const dims = `${Math.round(w)}×${Math.round(h)}`;
+    const dimsRaw = `${Math.round(w)}×${Math.round(h)}`;
 
     const addonsText = it.addons
       .filter((a) => a.checked)
@@ -524,17 +564,33 @@ function drawItemsTable(
     const lineTotal = perItemPrice * qty;
 
     const numStr = String(idx + 1);
-    const locStr = it.location || "";
     const unitPriceStr = formatMoneyPdf(perItemPrice);
     const qtyStr = moneyNumberFmt.format(qty);
     const totalStr = formatMoneyPdf(lineTotal);
 
-    const detailsMaxWidth = colWidths.details - 8;
+    // NEW: wrap profile + location + details into multiple lines
+    const profileLines = it.profileName
+      ? doc.splitTextToSize(it.profileName, colWidths.profile - 8)
+      : [];
+    const locationLines = it.location
+      ? doc.splitTextToSize(it.location, colWidths.location - 8)
+      : [];
     const detailsLines = detailsFull
-      ? doc.splitTextToSize(detailsFull, detailsMaxWidth)
+      ? doc.splitTextToSize(detailsFull, colWidths.details - 8)
       : [];
 
-    const linesCount = Math.max(1, detailsLines.length);
+    // dims is short, but still ensure it can't overflow visually
+    const dimsLines = dimsRaw
+      ? doc.splitTextToSize(dimsRaw, colWidths.dims - 8)
+      : [];
+
+    const linesCount = Math.max(
+      1,
+      profileLines.length,
+      locationLines.length,
+      detailsLines.length,
+      dimsLines.length
+    );
     const rowHeight = linesCount * rowLineHeight + 6;
 
     if (y + rowHeight > pageHeight - marginBottom) {
@@ -554,13 +610,38 @@ function drawItemsTable(
     drawRowBorders(rowHeight, rowTop);
 
     doc.setFont(PDF_FONT_NAME, "normal");
+
+    // מס'
     drawTextSmart(doc, numStr, colX.num - 4, baseline, { align: "right" });
-    drawTextSmart(doc, dims, colX.dims - 4, baseline, { align: "right" });
-    if (locStr) {
-      drawTextSmart(doc, locStr, colX.location - 4, baseline, {
-        align: "right",
+
+    // פרופיל – all lines
+    if (profileLines.length > 0) {
+      let dy = baseline;
+      profileLines.forEach((line: string) => {
+        drawTextSmart(doc, line, colX.profile - 4, dy, { align: "right" });
+        dy += rowLineHeight;
       });
     }
+
+    // מידות – usually one line, but safe to wrap
+    if (dimsLines.length > 0) {
+      let dy = baseline;
+      dimsLines.forEach((line: string) => {
+        drawTextSmart(doc, line, colX.dims - 4, dy, { align: "right" });
+        dy += rowLineHeight;
+      });
+    }
+
+    // מיקום – wrapped
+    if (locationLines.length > 0) {
+      let dy = baseline;
+      locationLines.forEach((line: string) => {
+        drawTextSmart(doc, line, colX.location - 4, dy, { align: "right" });
+        dy += rowLineHeight;
+      });
+    }
+
+    // פרטים – wrapped
     if (detailsLines.length > 0) {
       let dy = baseline;
       detailsLines.forEach((line: string) => {
@@ -568,6 +649,8 @@ function drawItemsTable(
         dy += rowLineHeight;
       });
     }
+
+    // מחיר ליח׳ / כמות / סה״כ – stay single-line, LTR numbers
     drawTextSmart(doc, unitPriceStr, colX.unitPrice - 4, baseline, {
       align: "right",
       forceRtl: false,
