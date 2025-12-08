@@ -1,73 +1,80 @@
-# React + TypeScript + Vite
+# Aluminum Price App
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A desktop application for creating and managing aluminum price quotes, built with Tauri (Windows .exe) and React.
 
-Currently, two official plugins are available:
+## Project Structure
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+├── src/                    # React frontend source code
+├── src-tauri/              # Tauri backend (Rust) - Windows .exe app
+├── android/                 # Android app (Capacitor) - For future development
+├── public/                  # Static assets
+└── dist/                    # Build output (generated)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Features
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- Create and manage customer quotes
+- Calculate prices based on window profiles and dimensions
+- Export quotes to PDF
+- Customer management
+- Profile management (window types and pricing)
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Development
+
+### Prerequisites
+
+- Node.js (v18 or higher)
+- Rust (for Tauri)
+- Windows SDK (for building Windows .exe)
+
+### Setup
+
+1. Install dependencies:
+```bash
+npm install
 ```
+
+2. Run development server:
+```bash
+npm run tauri:dev
+```
+
+This will start the Vite dev server and launch the Tauri app.
+
+### Building
+
+Build the Windows executable:
+```bash
+npm run tauri:build
+```
+
+The built .exe installer will be in `src-tauri/target/release/bundle/nsis/`
+
+## Android App (Future)
+
+The `android/` folder contains Capacitor configuration for future Android development. Currently, the project focuses on the Windows desktop application.
+
+To work on Android in the future:
+1. Ensure Capacitor dependencies are installed (already in devDependencies)
+2. Sync Capacitor: `npx cap sync android`
+3. Open Android Studio: `npx cap open android`
+
+## Scripts
+
+- `npm run dev` - Start Vite dev server (web only)
+- `npm run build` - Build web version
+- `npm run tauri:dev` - Start Tauri development (recommended)
+- `npm run tauri:build` - Build Windows .exe
+- `npm run lint` - Run ESLint
+
+## Technology Stack
+
+- **Frontend**: React 19, TypeScript, Tailwind CSS
+- **Desktop**: Tauri 2.x (Rust)
+- **PDF Export**: jsPDF
+- **UI Components**: Radix UI, shadcn/ui
+
+## License
+
+Private project

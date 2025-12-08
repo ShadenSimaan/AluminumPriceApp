@@ -22,6 +22,13 @@ export type Addon = {
   checked: boolean;
 };
 
+export type FreeFormAddition = {
+  id: string;
+  name: string;
+  price: string; // text input
+  qty: string; // text input
+};
+
 export type LineItem = {
   id: string;
   widthCm: string; // text input
@@ -58,6 +65,7 @@ export type AppCurrentState = {
   customerNotes: string;
   title: string;
   items: LineItem[];
+  freeFormAdditions: FreeFormAddition[]; // תוספות חופשיות
   taxPercentText: string;
   notes: string;
 };
@@ -66,6 +74,8 @@ export type AppState = {
   customers: Customer[];
   quotes: Quote[];
   profiles: Profile[];
+  addons: Addon[]; // Global addons that can be managed in settings
   current: AppCurrentState;
   ui: AppUIState;
+  pdfSaveFolder?: string; // Custom folder path for PDF exports (optional, defaults to Desktop)
 };

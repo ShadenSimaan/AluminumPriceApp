@@ -25,7 +25,13 @@ body {
   background-attachment: fixed;
   -webkit-tap-highlight-color: transparent;
   scrollbar-gutter: stable;          /* reduce layout shifts on desktop */
+  font-size: 16px;                   /* Increased base font size */
 }
+
+/* Larger font sizes throughout */
+h1 { font-size: 1.75rem; }           /* 28px */
+h2 { font-size: 1.5rem; }            /* 24px */
+h3 { font-size: 1.25rem; }           /* 20px */
 
 .container-app {
   min-height: calc(var(--vh) * 100);

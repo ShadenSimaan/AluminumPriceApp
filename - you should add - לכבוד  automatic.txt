@@ -1,0 +1,12 @@
+- you should add - לכבוד  automatically when we add a new customer to the pdf exportion. also you can already mention the word in the שם לקוח.
+
+the הערות למסמך (יופיעו ב-PDF) should be above the date.
+
+I want to have a separated way to add a תוספות so that I can add a free random prices with words and things that are additions. sometimes they are not related to the רוחב (ס״מ) and גובה (ס״מ)
+
+also the default when I click on the הוסף להצעה , when it goes back to the first פרופיל, but at the same time it is showing a different name, so I want it to be synchronized along with the price and the way I choose profiles. and to always choose nothing as a default, like -בחר-
+
+I want to be able to edit the פריטי ההצעה so I don't need to rewrite everything again if I want to add or modify a little thing.
+
+also I want to be able to move and change the order of a single order in the פריטי ההצעה
+
