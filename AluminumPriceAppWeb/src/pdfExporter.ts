@@ -60,14 +60,10 @@ async function getPdfSavePath(filename: string, year: number, customFolder?: str
     let basePath: string;
     
     if (customFolder && customFolder.trim()) {
-      // Use custom folder
+      // Use custom folder (path shown in UI)
       console.log("Using custom folder:", customFolder);
       basePath = customFolder.trim();
-      
-      // Verify the custom folder exists
-      if (!(await fsApi.exists(basePath))) {
-        throw new Error(`התיקייה שנבחרה לא קיימת: ${basePath}`);
-      }
+      // Skip exists check - user selected this folder; permission may block exists() even when folder is valid
     } else {
       // Get desktop directory - try multiple methods
       try {
@@ -218,7 +214,10 @@ async function getPdfSavePath(filename: string, year: number, customFolder?: str
       }
     } catch (folderError: any) {
       console.error("Failed to create folders:", folderError);
-      console.error("Folder error details:", JSON.stringify(folderError, null, 2));
+      if (customFolder && customFolder.trim()) {
+        console.warn("Returning path anyway so export can try scope and write");
+        return fullPath;
+      }
       throw new Error(`Failed to create folders: ${folderError?.message || folderError}`);
     }
     
@@ -241,7 +240,8 @@ async function getPdfSavePath(filename: string, year: number, customFolder?: str
 }
 
 const PDF_FONT_NAME = "NotoHebrew";
-const PDF_FONT_FILE = "NotoSansHebrew-Regular.ttf"; // expects /fonts/NotoSansHebrew-Regular.ttf
+const PDF_FONT_FILE_REGULAR = "NotoSansHebrew-Regular.ttf";
+const PDF_FONT_FILE_BOLD = "NotoSansHebrew-Bold.ttf";
 const HEBREW_REGEX = /[\u0590-\u05FF]/;
 
 // --- Public types this module expects (structural typing, no need to import your own) ---
@@ -260,6 +260,7 @@ export interface PdfLineItem {
   location?: string;
   details?: string;
   unitPrice: string;
+  manualUnitPrice?: string;
   subtotal?: number;
   addons: PdfAddon[];
   profileName?: string; // make sure this exists on your items
@@ -282,7 +283,10 @@ export interface PdfQuotePayload {
   items: PdfLineItem[];
   freeFormAdditions?: PdfFreeFormAddition[];
   pdfSaveFolder?: string; // Optional custom folder path for saving PDFs
+  dimensionUnit?: "cm" | "mm"; // display dimensions in cm or mm (data is stored in cm)
 }
+
+export type PdfExportResult = { success: true; savedPath: string } | { success: false; error: string };
 
 // --- small helpers ---
 
@@ -345,23 +349,74 @@ function drawTextSmart(
   } catch {}
 }
 
-// register Noto font
-async function ensureHebrewFont(doc: any) {
-  try {
-    const fontResp = await fetch("/fonts/NotoSansHebrew-Regular.ttf");
-    if (!fontResp.ok) throw new Error("font missing");
-    const buf = await fontResp.arrayBuffer();
-    const base64 = arrayBufferToBase64(buf);
+/** Possible base paths for fonts (browser and Tauri). */
+function getFontBasePaths(): string[] {
+  const paths: string[] = [];
+  if (typeof document !== "undefined" && document.baseURI) {
+    try {
+      const base = new URL(document.baseURI);
+      paths.push(new URL("fonts/", base).href);
+      paths.push(new URL("./fonts/", base).href);
+    } catch {
+      paths.push("/fonts/");
+    }
+  } else {
+    paths.push("/fonts/");
+  }
+  return paths;
+}
 
-    doc.addFileToVFS(PDF_FONT_FILE, base64);
-    doc.addFont(PDF_FONT_FILE, PDF_FONT_NAME, "normal");
-    doc.addFont(PDF_FONT_FILE, PDF_FONT_NAME, "bold");
+/** Fetch font bytes; tries multiple URLs so it works in dev, production, and Tauri. */
+async function fetchFontBytes(filename: string): Promise<ArrayBuffer> {
+  const paths = getFontBasePaths();
+  let lastError: Error | null = null;
+  for (const base of paths) {
+    const url = base.endsWith("/") ? `${base}${filename}` : `${base}/${filename}`;
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) return await resp.arrayBuffer();
+      lastError = new Error(`HTTP ${resp.status}`);
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  throw lastError ?? new Error("font missing");
+}
+
+/** Register Noto Hebrew font (3-arg addFont so jsPDF uses default Unicode handling). Returns true if font was loaded. */
+async function ensureHebrewFont(doc: any): Promise<boolean> {
+  try {
+    const buf = await fetchFontBytes(PDF_FONT_FILE_REGULAR);
+    const base64Regular = arrayBufferToBase64(buf);
+
+    doc.addFileToVFS(PDF_FONT_FILE_REGULAR, base64Regular);
+    doc.addFont(PDF_FONT_FILE_REGULAR, PDF_FONT_NAME, "normal");
+
+    try {
+      const boldBuf = await fetchFontBytes(PDF_FONT_FILE_BOLD);
+      const base64Bold = arrayBufferToBase64(boldBuf);
+      doc.addFileToVFS(PDF_FONT_FILE_BOLD, base64Bold);
+      doc.addFont(PDF_FONT_FILE_BOLD, PDF_FONT_NAME, "bold");
+    } catch {
+      doc.addFont(PDF_FONT_FILE_REGULAR, PDF_FONT_NAME, "bold");
+    }
     doc.setFont(PDF_FONT_NAME, "bold");
+    return true;
   } catch (e) {
     console.warn(
-      "Hebrew font not found at /fonts/NotoSansHebrew-Regular.ttf. Proceeding with default font.",
+      "Hebrew font not found. Place NotoSansHebrew-Regular.ttf in public/fonts/. Proceeding with default font.",
       e
     );
+    return false;
+  }
+}
+
+/** Ensure PDF text is bold. Use built-in font if Hebrew font was not loaded (avoids 'widths' of undefined). */
+function setPdfBold(doc: any, useHebrew: boolean) {
+  if (useHebrew) {
+    doc.setFont(PDF_FONT_NAME, "bold");
+  } else {
+    doc.setFont("Helvetica", "bold");
   }
 }
 
@@ -384,26 +439,35 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 
 // --------- MAIN PUBLIC API ---------
 
-export async function exportQuotePdf(payload: PdfQuotePayload) {
+/** Build filename for PDF (customer name + date). */
+function getPdfFilename(customerName: string): string {
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, "0");
+  const dd = String(today.getDate()).padStart(2, "0");
+  const datePart = `${yyyy}-${mm}-${dd}`;
+  const nameForFile = (customerName || "לקוח ללא שם").trim().replace(/^לכבוד\s+/, "");
+  const safeBase = nameForFile.replace(/[\\/:*?"<>|]/g, "_");
+  return `${safeBase} ${datePart}.pdf`;
+}
+
+export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExportResult> {
+  const { customerName, customerPhone, customerEmail, notes } = payload;
+
+  if (!customerName.trim()) {
+    return { success: false, error: "אנא הזן/י שם לקוח לפני יצוא PDF" };
+  }
+  if (!payload.items.length && (!payload.freeFormAdditions || payload.freeFormAdditions.length === 0)) {
+    return { success: false, error: "ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF." };
+  }
+
   let jsPDFMod: any;
   try {
     jsPDFMod = await import("jspdf");
   } catch (e) {
-    alert("חסרות חבילות PDF. התקן/י: npm i jspdf");
-    return;
+    return { success: false, error: "חסרות חבילות PDF. התקן/י: npm i jspdf" };
   }
   const jsPDF = jsPDFMod.default || jsPDFMod;
-
-  const { customerName, customerPhone, customerEmail, notes } = payload;
-
-  if (!customerName.trim()) {
-    alert("אנא הזן/י שם לקוח לפני יצוא PDF");
-    return;
-  }
-  if (!payload.items.length) {
-    alert("ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF.");
-    return;
-  }
 
   const doc = new jsPDF({
     orientation: "portrait",
@@ -411,7 +475,19 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     format: "a4",
   });
 
-  await ensureHebrewFont(doc);
+  const hebrewOk = await ensureHebrewFont(doc);
+  let pdfFontName = hebrewOk ? PDF_FONT_NAME : "Helvetica";
+  setPdfBold(doc, hebrewOk);
+
+  // If the custom font has no usable metrics (jsPDF 'widths' undefined), fall back to Helvetica so export doesn't throw
+  if (pdfFontName === PDF_FONT_NAME) {
+    try {
+      doc.getTextWidth(" ");
+    } catch {
+      pdfFontName = "Helvetica";
+      doc.setFont("Helvetica", "bold");
+    }
+  }
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -429,7 +505,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     "ע.מ. מס' 023107659",
   ];
 
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(18);
   headerLines.forEach((line) => {
     drawTextSmart(doc, line, pageWidth / 2, cursorY, {
@@ -448,7 +524,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   
   // Customer name - "לכבוד" and name on same line, underline only under name
   if (customerNameWithPrefix) {
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(pdfFontName, "bold");
     doc.setFontSize(16);
     const nameX = pageWidth - marginX; // Right side
     
@@ -488,7 +564,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   }
   
   // Phone and email - bold, right-aligned
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(13);
   if (customerPhone?.trim()) {
     drawTextSmart(doc, customerPhone, pageWidth - marginX, cursorY, {
@@ -520,7 +596,9 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     pageWidth,
     pageHeight,
     marginTop,
-    marginBottom
+    marginBottom,
+    payload.dimensionUnit ?? "cm",
+    pdfFontName
   );
 
   // ===== Totals box on LEFT, but text still RTL / right-aligned =====
@@ -534,8 +612,10 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
       (s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0),
       0
     );
-    const unitPrice = parseLooseNumber(it.unitPrice);
-    const perItem = area * unitPrice + addonsSum;
+    const manual = (it.manualUnitPrice ?? "").trim();
+    const perItem = manual
+      ? parseLooseNumber(manual) + addonsSum
+      : area * parseLooseNumber(it.unitPrice) + addonsSum;
     return sum + perItem * qty;
   }, 0);
 
@@ -563,7 +643,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   boxY += 26;
 
     // Note: text is still right-aligned inside the box (RTL)
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(pdfFontName, "bold");
     doc.setFontSize(13);
     drawTextSmart(
       doc,
@@ -588,7 +668,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   doc.setDrawColor(210); // Match the border color
   doc.setLineWidth(0.3);
   doc.roundedRect(boxX + 10, boxY - 18, boxWidth - 20, 34, 6, 6);
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(16);
   drawTextSmart(
     doc,
@@ -597,7 +677,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     boxY + 2,
     { align: "right" }
   );
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
 
   // ===== Footer: anchored to bottom of last page =====
   const footerHeight = 80;
@@ -605,7 +685,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
   let footerY = footerTop;
 
   // Notes come BEFORE date
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(13);
   if (notes?.trim()) {
     const notesLabel = "הערות:";
@@ -614,20 +694,26 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
     });
     footerY += 20;
 
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(pdfFontName, "bold");
     doc.setFontSize(12);
     const notesWidth = pageWidth - marginX * 2;
-    const wrapped = doc.splitTextToSize(notes.trim(), notesWidth);
-    wrapped.forEach((line: string, idx: number) => {
-      drawTextSmart(doc, line, pageWidth - marginX, footerY + idx * 15, {
-        align: "right",
+    // Preserve user line breaks: split by \n then wrap each paragraph
+    const paragraphs = notes.trim().split(/\r?\n/);
+    const lineHeight = 15;
+    for (const para of paragraphs) {
+      const wrapped = doc.splitTextToSize(para.trim(), notesWidth);
+      wrapped.forEach((line: string, idx: number) => {
+        drawTextSmart(doc, line, pageWidth - marginX, footerY + idx * lineHeight, {
+          align: "right",
+        });
       });
-    });
-    footerY += wrapped.length * 15 + 8;
+      footerY += wrapped.length * lineHeight;
+    }
+    footerY += 8;
   }
 
   // Date comes after notes
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(13);
   drawTextSmart(
     doc,
@@ -640,7 +726,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
 
   // Signature label
   footerY += 10;
-  doc.setFont(PDF_FONT_NAME, "bold");
+  doc.setFont(pdfFontName, "bold");
   doc.setFontSize(13);
   drawTextSmart(doc, "חתימה:", pageWidth - marginX, footerY, {
     align: "right",
@@ -696,7 +782,29 @@ export async function exportQuotePdf(payload: PdfQuotePayload) {
       console.log("fsModule methods:", Object.keys(fsModule));
       
       // Get save path: [CUSTOM_FOLDER or Desktop]/[YEAR]/filename.pdf
-      const savePath = await getPdfSavePath(filename, yyyy, payload.pdfSaveFolder);
+      let savePath = await getPdfSavePath(filename, yyyy, payload.pdfSaveFolder);
+      
+      if (!savePath && payload.pdfSaveFolder && payload.pdfSaveFolder.trim()) {
+        console.warn("getPdfSavePath returned null; using shown folder path");
+        const base = payload.pdfSaveFolder.trim();
+        const yearFolder = await pathModule.join(base, String(yyyy));
+        savePath = await pathModule.join(yearFolder, filename);
+        console.log("Built save path from shown folder:", savePath);
+        // Scope and create year folder so the write can succeed
+        try {
+          const fsAny = fsModule as any;
+          if (typeof fsAny.scope === "function") {
+            await fsAny.scope(base, { recursive: true });
+          } else if (typeof fsAny.allowScope === "function") {
+            await fsAny.allowScope(base, { recursive: true });
+          }
+          if (fsModule.mkdir && !(await fsModule.exists(yearFolder))) {
+            await fsModule.mkdir(yearFolder, { recursive: true });
+          }
+        } catch (fallbackErr: any) {
+          console.warn("Fallback scope/mkdir:", fallbackErr?.message || fallbackErr);
+        }
+      }
       
       if (!savePath) {
         console.error("getPdfSavePath returned null");
@@ -859,33 +967,29 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
         throw writeError;
       }
       
-      // Update savePath for opening
-      const folderPathToOpen = await pathModule.dirname(finalSavePath);
-      console.log("Opening folder in Windows Explorer:", folderPathToOpen);
-      
-      // Open the folder in Windows Explorer (silently fail if it doesn't work)
+      // Open folder in Explorer with the PDF file selected (so user sees where it was saved)
       try {
-        console.log("Attempting to open folder in Windows Explorer...");
-        await openerModule.openPath(folderPathToOpen);
-        console.log("✓ Folder opened in Windows Explorer successfully!");
+        const { Command } = shellModule;
+        // Windows: explorer /select,"path" — comma after /select is required
+        const selectArg = "/select,\"" + finalSavePath.replace(/"/g, "\\\"") + "\"";
+        let explorerCommand;
+        if (typeof Command.create === "function") {
+          explorerCommand = Command.create("explorer", [selectArg]);
+        } else if (typeof Command === "function") {
+          explorerCommand = new (Command as any)("explorer", [selectArg]);
+        } else {
+          throw new Error("Command API not available");
+        }
+        await explorerCommand.execute();
+        console.log("✓ Folder opened with PDF selected!");
       } catch (explorerError: any) {
-        console.warn("⚠ Failed to open folder with opener, trying shell command:", explorerError?.message || explorerError);
-        // Fallback: try using shell command
+        console.warn("⚠ Failed to open folder with selection, trying open folder only:", explorerError?.message || explorerError);
         try {
-          const { Command } = shellModule;
-          let explorerCommand;
-          if (typeof Command.create === "function") {
-            explorerCommand = Command.create("explorer", [folderPathToOpen]);
-          } else if (typeof Command === "function") {
-            explorerCommand = new (Command as any)("explorer", [folderPathToOpen]);
-          } else {
-            throw new Error("Command API not available");
-          }
-          await explorerCommand.execute();
-          console.log("✓ Folder opened via shell command!");
-        } catch (shellError: any) {
-          console.warn("⚠ Failed to open folder with shell command:", shellError?.message || shellError);
-          // Silently fail - the PDF was saved successfully, that's what matters
+          const folderPathToOpen = await pathModule.dirname(finalSavePath);
+          await openerModule.openPath(folderPathToOpen);
+          console.log("✓ Folder opened (file not selected)");
+        } catch (fallbackErr: any) {
+          console.warn("⚠ Could not open folder:", fallbackErr?.message || fallbackErr);
         }
       }
       
@@ -913,6 +1017,7 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
       }
       
       console.log("=== PDF EXPORT COMPLETE ===");
+      return { success: true, savedPath: finalSavePath };
       
     } catch (error: any) {
       console.error("❌ Error in Tauri PDF export:", error);
@@ -921,22 +1026,73 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
         message: error?.message,
         stack: error?.stack
       });
-      
-      // Only show error if it's a critical error (not just opening failure)
-      // Opening failures are handled silently above
-      const errorMsg = error?.message || String(error);
-      if (!errorMsg.includes("Not allowed to open") && !errorMsg.includes("open path")) {
-        alert(`שגיאה ביצוא PDF: ${errorMsg}`);
-      } else {
-        // Just log it - PDF was saved successfully
-        console.log("✓ PDF was saved successfully (opening failed silently)");
-      }
+      throw error;
     }
   } else {
     // In browser: open in new window and download
     console.log("Browser environment, using standard download...");
     doc.output("dataurlnewwindow");
     doc.save(filename);
+    return { success: true, savedPath: "" };
+  }
+}
+
+/** Returns the folder path where PDFs are (or will be) saved. Null if not in Tauri. */
+export async function getPdfSaveFolderPath(customFolder?: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  try {
+    const pathApi = await import("@tauri-apps/api/path");
+    const year = new Date().getFullYear();
+    let basePath: string;
+    if (customFolder && customFolder.trim()) {
+      basePath = customFolder.trim();
+    } else {
+      if (typeof pathApi.desktopDir === "function") {
+        basePath = await pathApi.desktopDir();
+      } else {
+        const homeDir = await pathApi.homeDir();
+        basePath = await pathApi.join(homeDir, "Desktop");
+      }
+      basePath = await pathApi.join(basePath, "הצעת מחיר");
+    }
+    const yearFolder = await pathApi.join(basePath, String(year));
+    return yearFolder;
+  } catch {
+    return null;
+  }
+}
+
+/** Opens the folder where PDF files are saved (the one shown in the UI). */
+export async function openPdfSaveFolder(customFolder?: string): Promise<{ success: boolean; error?: string }> {
+  if (!isTauri()) {
+    return { success: false, error: "זמין רק באפליקציה" };
+  }
+  const folderPath =
+    customFolder && customFolder.trim()
+      ? customFolder.trim()
+      : await getPdfSaveFolderPath(undefined);
+  if (!folderPath) return { success: false, error: "לא ניתן לקבוע את נתיב התיקייה" };
+
+  try {
+    const opener = await import("@tauri-apps/plugin-opener");
+    await opener.openPath(folderPath);
+    return { success: true };
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (msg.includes("Not allowed") || msg.includes("not allowed")) {
+      try {
+        const shell = await import("@tauri-apps/plugin-shell");
+        const { Command } = shell;
+        const cmd = typeof Command.create === "function"
+          ? Command.create("explorer", [folderPath])
+          : new (Command as any)("explorer", [folderPath]);
+        await cmd.execute();
+        return { success: true };
+      } catch (shellErr: any) {
+        return { success: false, error: shellErr?.message || String(shellErr) };
+      }
+    }
+    return { success: false, error: msg };
   }
 }
 
@@ -951,7 +1107,9 @@ function drawItemsTable(
   pageWidth: number,
   pageHeight: number,
   marginTop: number,
-  marginBottom: number
+  marginBottom: number,
+  dimensionUnit: "cm" | "mm" = "cm",
+  fontName: string = PDF_FONT_NAME
 ): number {
   const right = pageWidth - marginX;
   const left = marginX;
@@ -1025,15 +1183,19 @@ function drawItemsTable(
 
     const centerY = y + headerHeight / 2 + 4;
 
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(fontName, "bold");
     doc.setFontSize(13);
     drawTextSmart(doc, "מס׳", colX.num - 4, centerY, { align: "right" });
     drawTextSmart(doc, "פרופיל", colX.profile - 4, centerY, {
       align: "right",
     });
-    drawTextSmart(doc, "מידות )ס״מ(", colX.dims - 4, centerY, {
-      align: "right",
-    });
+    drawTextSmart(
+      doc,
+      dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)",
+      colX.dims - 4,
+      centerY,
+      { align: "right" }
+    );
     drawTextSmart(doc, "מיקום", colX.location - 4, centerY, {
       align: "right",
     });
@@ -1049,7 +1211,7 @@ function drawItemsTable(
     drawTextSmart(doc, "סה״כ", colX.total - 4, centerY, {
       align: "right",
     });
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(fontName, "bold");
     doc.setFontSize(12);
 
     y += headerHeight;
@@ -1082,7 +1244,10 @@ function drawItemsTable(
   items.forEach((it, idx) => {
     const w = parseLooseNumber(it.widthCm);
     const h = parseLooseNumber(it.heightCm);
-    const dims = `${Math.round(w)}×${Math.round(h)}`;
+    const dims =
+      dimensionUnit === "mm"
+        ? `${Math.round(w * 10)}×${Math.round(h * 10)}`
+        : `${Math.round(w)}×${Math.round(h)}`;
 
     const addonsText = it.addons
       .filter((a) => a.checked)
@@ -1097,8 +1262,10 @@ function drawItemsTable(
       (s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0),
       0
     );
-    const unitPriceNum = parseLooseNumber(it.unitPrice);
-    const perItemPrice = area * unitPriceNum + addonsSum;
+    const manual = (it.manualUnitPrice ?? "").trim();
+    const perItemPrice = manual
+      ? parseLooseNumber(manual) + addonsSum
+      : area * parseLooseNumber(it.unitPrice) + addonsSum;
     const lineTotal = perItemPrice * qty;
 
     const numStr = String(idx + 1);
@@ -1155,7 +1322,7 @@ function drawItemsTable(
 
     drawRowBorders(rowHeight, rowTop);
 
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(fontName, "bold");
     doc.setFontSize(12);
 
     // מס'
@@ -1267,7 +1434,7 @@ function drawItemsTable(
     }
 
     drawRowBorders(rowHeight, rowTop);
-    doc.setFont(PDF_FONT_NAME, "bold");
+    doc.setFont(fontName, "bold");
 
     // מס'
     const numStr = String(items.length + addIdx + 1);

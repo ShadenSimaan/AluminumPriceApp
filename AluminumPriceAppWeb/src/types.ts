@@ -36,7 +36,9 @@ export type LineItem = {
   qty: string; // text input
   profileId?: string;
   profileName?: string; // <-- חשוב בשביל ה-PDF והטבלה
-  unitPrice: string; // from profile by default but editable
+  unitPrice: string; // from profile by default but editable (price per m²)
+  /** When set, used as price per unit directly (no formula). Addons still added. */
+  manualUnitPrice?: string;
   location?: string;
   details?: string;
   addons: Addon[];
@@ -56,6 +58,7 @@ export type Quote = {
 export type AppUIState = {
   tab: "quote" | "customers";
   settingsOpen: boolean;
+  profilesSettingsOpen: boolean;
 };
 
 export type AppCurrentState = {
@@ -70,6 +73,9 @@ export type AppCurrentState = {
   notes: string;
 };
 
+/** Dimension unit for width/height (stored internally in cm) */
+export type DimensionUnit = "cm" | "mm";
+
 export type AppState = {
   customers: Customer[];
   quotes: Quote[];
@@ -78,4 +84,5 @@ export type AppState = {
   current: AppCurrentState;
   ui: AppUIState;
   pdfSaveFolder?: string; // Custom folder path for PDF exports (optional, defaults to Desktop)
+  dimensionUnit?: DimensionUnit; // ס״מ or מ״מ – display/input only; data always in cm
 };

@@ -11,6 +11,10 @@
 
 * { box-sizing: border-box; }
 
+html {
+  font-size: 1.2rem;                 /* 19.2px base – whole app scales up for readability */
+}
+
 html, body, #root {
   height: 100%;
 }
@@ -25,13 +29,27 @@ body {
   background-attachment: fixed;
   -webkit-tap-highlight-color: transparent;
   scrollbar-gutter: stable;          /* reduce layout shifts on desktop */
-  font-size: 16px;                   /* Increased base font size */
+  font-size: 1rem;                   /* uses root 1.2rem → ~19.2px */
+  font-weight: 600;                  /* semi-bold app-wide */
 }
 
-/* Larger font sizes throughout */
-h1 { font-size: 1.75rem; }           /* 28px */
-h2 { font-size: 1.5rem; }            /* 24px */
-h3 { font-size: 1.25rem; }           /* 20px */
+/* Larger headings for hierarchy */
+h1 { font-size: 2rem; font-weight: 700; }      /* ~38px */
+h2 { font-size: 1.75rem; font-weight: 700; }   /* ~34px */
+h3 { font-size: 1.5rem; font-weight: 700; }    /* ~29px */
+
+/* Ensure buttons, labels, and general text inherit bolder weight */
+#root {
+  font-weight: 600;
+}
+
+#root input,
+#root button,
+#root select,
+#root textarea,
+#root label {
+  font-weight: 600;
+}
 
 .container-app {
   min-height: calc(var(--vh) * 100);
@@ -77,7 +95,7 @@ h3 { font-size: 1.25rem; }           /* 20px */
 }
 
 .table-inner-min {
-  min-width: 720px; /* as requested */
+  min-width: 600px; /* fit window margins without horizontal scroll */
 }
 
 /* Focus rings */

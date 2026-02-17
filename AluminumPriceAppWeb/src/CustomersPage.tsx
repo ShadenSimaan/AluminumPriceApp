@@ -13,7 +13,8 @@ type CustomersPageProps = {
   quotes: Quote[];
   onOpenLast: (customerId: string) => void;
   onCreateNewOrder: () => void;
-  onExportPdf: (customerId: string) => void;
+  /** Open the folder where PDFs are saved (replaces per-customer export in list) */
+  onOpenPdfFolder?: () => void;
   onDeleteCustomer: (customerId: string) => void;
 };
 
@@ -22,7 +23,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
   quotes,
   onOpenLast,
   onCreateNewOrder,
-  onExportPdf,
+  onOpenPdfFolder,
   onDeleteCustomer,
 }) => {
   const latestMap = useMemo(() => {
@@ -33,6 +34,11 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
       latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
     return latest;
   }, [quotes]);
+
+  const sortedCustomers = useMemo(
+    () => [...customers].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
+    [customers]
+  );
 
   return (
     <section className="grid gap-4">
@@ -49,10 +55,10 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
 
         {/* Mobile: cards */}
         <div className="grid sm:hidden grid-cols-1 gap-3">
-          {customers.length === 0 ? (
+          {sortedCustomers.length === 0 ? (
             <div className="text-slate-500 text-sm">אין לקוחות עדיין</div>
           ) : (
-            customers.map((c) => {
+            sortedCustomers.map((c) => {
               const last = latestMap[c.id];
               return (
                 <div key={c.id} className="rounded-xl border p-3 bg-white">
@@ -74,12 +80,15 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
                       >
                         פתח הצעה
                       </button>
-                      <button
-                        className="px-3 py-1.5 rounded-md bg-white border"
-                        onClick={() => onExportPdf(c.id)}
-                      >
-                        ייצוא ל-PDF
-                      </button>
+                      {onOpenPdfFolder && (
+                        <button
+                          className="px-3 py-1.5 rounded-md bg-white border"
+                          onClick={onOpenPdfFolder}
+                          title="פתח תיקייה שבה נשמרים קבצי ה-PDF"
+                        >
+                          פתח תיקיית PDF
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
@@ -110,14 +119,14 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
               </tr>
             </thead>
             <tbody>
-              {customers.length === 0 ? (
+              {sortedCustomers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-6 text-center text-slate-500">
                     אין לקוחות עדיין
                   </td>
                 </tr>
               ) : (
-                customers.map((c) => {
+                sortedCustomers.map((c) => {
                   const last = latestMap[c.id];
                   return (
                     <tr key={c.id} className="border-t">
@@ -136,12 +145,15 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
                           >
                             פתח הצעה
                           </button>
-                          <button
-                            className="px-3 py-1.5 rounded-md bg-white border"
-                            onClick={() => onExportPdf(c.id)}
-                          >
-                            ייצוא ל-PDF
-                          </button>
+                          {onOpenPdfFolder && (
+                            <button
+                              className="px-3 py-1.5 rounded-md bg-white border"
+                              onClick={onOpenPdfFolder}
+                              title="פתח תיקייה שבה נשמרים קבצי ה-PDF"
+                            >
+                              פתח תיקיית PDF
+                            </button>
+                          )}
                           <button
                             className="px-3 py-1.5 rounded-md bg-red-600 text-white"
                             onClick={() => onDeleteCustomer(c.id)}

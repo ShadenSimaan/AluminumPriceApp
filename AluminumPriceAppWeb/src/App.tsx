@@ -1,7 +1,9 @@
 // FILE: src/App.tsx
-import React, { useEffect, useState } from "react";
-import { exportQuotePdf } from "./pdfExporter";
-import { AppState, Customer, LineItem, Profile, FreeFormAddition } from "./types";
+import React, { useEffect, useRef, useState } from "react";
+import { Settings } from "lucide-react";
+import { exportQuotePdf, openPdfSaveFolder } from "./pdfExporter";
+import { AppState, Customer, LineItem, Profile, FreeFormAddition, Addon } from "./types";
+import { readStateFromFile, writeStateToFile, isTauri, getDataFilePath } from "./storage";
 import QuotePage from "./QuotePage";
 import CustomersPage from "./CustomersPage";
 
@@ -84,52 +86,56 @@ const DEFAULT_STATE: AppState = {
     taxPercentText: "18",
     notes: "",
   },
-  ui: { tab: "quote", settingsOpen: false },
+  ui: { tab: "quote", settingsOpen: false, profilesSettingsOpen: false },
   pdfSaveFolder: undefined,
+  dimensionUnit: "cm",
 };
+
+/** ===== Normalize a raw object into valid AppState (for LS or data file) ===== */
+function normalizeState(obj: unknown): AppState {
+  const o: Partial<AppState> =
+    typeof obj === "object" && obj !== null ? (obj as Partial<AppState>) : {};
+  const customers = Array.isArray(o.customers) ? o.customers : [];
+  const quotes = Array.isArray(o.quotes) ? o.quotes : [];
+  const profiles =
+    Array.isArray(o.profiles) && o.profiles.length > 0 ? o.profiles : defaultProfiles;
+  const addons =
+    Array.isArray(o.addons) && o.addons.length > 0
+      ? o.addons
+      : defaultAddonsPreset.map((a) => ({ ...a }));
+  const currentRaw: any = o.current ?? {};
+  const current = {
+    customerName: String(currentRaw.customerName ?? ""),
+    customerPhone: String(currentRaw.customerPhone ?? ""),
+    customerEmail: String(currentRaw.customerEmail ?? ""),
+    customerNotes: String(currentRaw.customerNotes ?? ""),
+    title: String(currentRaw.title ?? "הצעת מחיר"),
+    items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
+    freeFormAdditions: Array.isArray(currentRaw.freeFormAdditions) ? currentRaw.freeFormAdditions : [],
+    taxPercentText: String(currentRaw.taxPercentText ?? "18"),
+    notes: String(currentRaw.notes ?? ""),
+  };
+  const uiRaw: any = o.ui ?? {};
+  const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
+  const ui = {
+    tab,
+    settingsOpen: Boolean(uiRaw.settingsOpen ?? false),
+    profilesSettingsOpen: Boolean(uiRaw.profilesSettingsOpen ?? false),
+  };
+  const pdfSaveFolder = typeof o.pdfSaveFolder === "string" ? o.pdfSaveFolder : undefined;
+  const dimensionUnit = o.dimensionUnit === "mm" ? "mm" : "cm";
+  return { customers, quotes, profiles, addons, current, ui, pdfSaveFolder, dimensionUnit };
+}
 
 /** ===== Validate + migrate any LS object to the proper shape ===== */
 function hydrateState(): AppState {
   const raw = localStorage.getItem(LS_KEY);
   if (!raw) return structuredClone(DEFAULT_STATE);
-
   try {
-    const parsed = JSON.parse(raw);
-    const obj: Partial<AppState> =
-      typeof parsed === "object" && parsed ? parsed : {};
-
-    const customers = Array.isArray(obj.customers) ? obj.customers : [];
-    const quotes = Array.isArray(obj.quotes) ? obj.quotes : [];
-    const profiles =
-      Array.isArray(obj.profiles) && obj.profiles.length > 0
-        ? obj.profiles
-        : defaultProfiles;
-
-    const currentRaw: any = obj.current ?? {};
-    const current = {
-      customerName: String(currentRaw.customerName ?? ""),
-      customerPhone: String(currentRaw.customerPhone ?? ""),
-      customerEmail: String(currentRaw.customerEmail ?? ""),
-      customerNotes: String(currentRaw.customerNotes ?? ""),
-      title: String(currentRaw.title ?? "הצעת מחיר"),
-      items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
-      freeFormAdditions: Array.isArray(currentRaw.freeFormAdditions) ? currentRaw.freeFormAdditions : [],
-      taxPercentText: String(currentRaw.taxPercentText ?? "18"),
-      notes: String(currentRaw.notes ?? ""),
-    };
-
-    const uiRaw: any = obj.ui ?? {};
-    const tab: "quote" | "customers" =
-      uiRaw.tab === "customers" ? "customers" : "quote";
-    const ui = { tab, settingsOpen: Boolean(uiRaw.settingsOpen ?? false) };
-
-    const pdfSaveFolder = typeof obj.pdfSaveFolder === "string" ? obj.pdfSaveFolder : undefined;
-
-    const safe: AppState = { customers, quotes, profiles, addons, current, ui, pdfSaveFolder };
-    return safe;
+    return normalizeState(JSON.parse(raw));
   } catch (e) {
     try {
-      localStorage.setItem(LS_KEY + ":backup", raw!);
+      localStorage.setItem(LS_KEY + ":backup", raw);
     } catch {}
     return structuredClone(DEFAULT_STATE);
   }
@@ -254,6 +260,7 @@ export default function App() {
       profileId: undefined,
       profileName: undefined,
       unitPrice: "0",
+      manualUnitPrice: "",
       location: "",
       details: "",
       addons: createAddonsFromGlobal(state.addons),
@@ -279,10 +286,35 @@ export default function App() {
     }, 2800);
   }
 
-  // Persist on change (autosave to localStorage)
+  // Persist on change: always localStorage; in Tauri also save to app data file (debounced)
   useEffect(() => {
     localStorage.setItem(LS_KEY, JSON.stringify(state));
   }, [state]);
+
+  const fileWriteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    if (fileWriteTimeoutRef.current) clearTimeout(fileWriteTimeoutRef.current);
+    fileWriteTimeoutRef.current = setTimeout(() => {
+      fileWriteTimeoutRef.current = null;
+      writeStateToFile(state);
+    }, 600);
+    return () => {
+      if (fileWriteTimeoutRef.current) clearTimeout(fileWriteTimeoutRef.current);
+    };
+  }, [state]);
+
+  // On startup in Tauri: load from data file if present (overrides localStorage)
+  const fileLoadDoneRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri() || fileLoadDoneRef.current) return;
+    fileLoadDoneRef.current = true;
+    readStateFromFile().then((fileState) => {
+      if (fileState != null && typeof fileState === "object") {
+        setState(normalizeState(fileState));
+      }
+    });
+  }, []);
 
   // Keep active profile valid when profiles change
   useEffect(() => {
@@ -315,6 +347,7 @@ export default function App() {
     const heightCm = currentDraft.heightCm ?? "";
     const qtyText = currentDraft.qty ?? "";
     const unitPriceText = currentDraft.unitPrice ?? "0";
+    const manualUnitPriceText = (currentDraft.manualUnitPrice ?? "").trim();
     const w = parseLooseNumber(widthCm);
     const h = parseLooseNumber(heightCm);
     const qty = Math.max(0, parseLooseNumber(qtyText));
@@ -323,8 +356,9 @@ export default function App() {
       (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
       0
     );
-    const unitPriceNum = parseLooseNumber(unitPriceText);
-    const perItemPrice = area * unitPriceNum + addonsPerItem;
+    const perItemPrice = manualUnitPriceText
+      ? parseLooseNumber(manualUnitPriceText) + addonsPerItem
+      : parseLooseNumber(unitPriceText) * area + addonsPerItem;
     const subtotal = perItemPrice * qty;
 
     const item: LineItem = {
@@ -335,6 +369,7 @@ export default function App() {
       profileId: currentDraft.profileId,
       profileName: currentDraft.profileName,
       unitPrice: unitPriceText,
+      manualUnitPrice: manualUnitPriceText || undefined,
       location: currentDraft.location ?? "",
       details: currentDraft.details ?? "",
       addons: (currentDraft.addons ?? []).map((a) => ({ ...a })),
@@ -362,13 +397,7 @@ export default function App() {
     setItemEditor(newEditor);
     setActiveProfileId(undefined); // Reset to nothing selected
 
-    const hasCustomerName = state.current.customerName.trim().length > 0;
-    showToast(
-      hasCustomerName
-        ? "החלון נוסף להצעה ונשמר אוטומטית"
-        : "החלון נוסף להצעה (שמור הצעה לאחר הזנת שם לקוח)",
-      "success"
-    );
+    showToast("הפריט נוסף להצעה (הכל נשמר אוטומטית)", "success");
   }
 
   function removeItem(id: string) {
@@ -466,24 +495,27 @@ export default function App() {
     setItemEditor(initItemEditor());
   }
 
-  // Completely new empty quote and go to "הצעה" tab
+  // Completely new empty quote: auto-save current quote to system (if has customer), then clear
   function startNewEmptyQuote() {
-    setState((s) => ({
-      ...s,
-      ui: { ...s.ui, tab: "quote" },
-      current: {
-        ...s.current,
+    setState((s) => {
+      const { nextState } = saveQuoteToState(s);
+      const emptyCurrent = {
         customerName: "",
         customerPhone: "",
         customerEmail: "",
         customerNotes: "",
         title: "הצעת מחיר",
-        items: [],
-        freeFormAdditions: [],
+        items: [] as LineItem[],
+        freeFormAdditions: [] as FreeFormAddition[],
         notes: "",
         taxPercentText: "18",
-      },
-    }));
+      };
+      return {
+        ...nextState,
+        ui: { ...nextState.ui, tab: "quote" as const },
+        current: emptyCurrent,
+      };
+    });
     clearCurrentForm();
     setActiveProfileId(undefined);
   }
@@ -551,8 +583,27 @@ export default function App() {
     clearCurrentForm();
   }
 
-  function deleteCustomer(customerId: string) {
-    if (!confirm("למחוק את הלקוח וכל ההצעות שלו?")) return;
+  async function deleteCustomer(customerId: string) {
+    const customer = state.customers.find((c) => c.id === customerId);
+    const name = customer?.name ? ` "${customer.name}"` : "";
+    const message = `האם אתה בטוח שברצונך למחוק את הלקוח${name}? פעולה זו תמחק גם את כל ההצעות השמורות של הלקוח.`;
+    let confirmed = false;
+    if (isTauri()) {
+      try {
+        const dialogModule = await import("@tauri-apps/plugin-dialog");
+        confirmed = await dialogModule.confirm(message, {
+          title: "אישור מחיקה",
+          kind: "warning",
+          okLabel: "כן, מחק",
+          cancelLabel: "ביטול",
+        });
+      } catch {
+        confirmed = window.confirm(message);
+      }
+    } else {
+      confirmed = window.confirm(message);
+    }
+    if (!confirmed) return;
     setState((s) => ({
       ...s,
       customers: s.customers.filter((c) => c.id !== customerId),
@@ -571,23 +622,47 @@ export default function App() {
       return;
     }
 
-    // In Tauri, we don't need to open a window - the PDF will open with the system viewer
-    await exportQuotePdf({
-      title: state.current.title || "הצעת מחיר",
-      customerName: state.current.customerName,
-      customerPhone: state.current.customerPhone,
-      customerEmail: state.current.customerEmail,
-      notes: state.current.notes,
-      taxPercentText: state.current.taxPercentText ?? "18",
-      items: state.current.items,
-      freeFormAdditions: state.current.freeFormAdditions,
-      pdfSaveFolder: state.pdfSaveFolder, // Pass custom folder if set
-    });
+    try {
+      // Save the current quote to the system behind the scenes before exporting
+      const { nextState, error: saveError } = saveQuoteToState(state);
+      if (saveError) {
+        showToast(saveError, "error");
+        return;
+      }
+      setState(nextState);
 
-    // Automatically save the quote when exporting PDF
-    saveQuote(false); // Don't show feedback since we'll show a different message
+      const result = await exportQuotePdf({
+        title: nextState.current.title || "הצעת מחיר",
+        customerName: nextState.current.customerName,
+        customerPhone: nextState.current.customerPhone,
+        customerEmail: nextState.current.customerEmail,
+        notes: nextState.current.notes,
+        taxPercentText: nextState.current.taxPercentText ?? "18",
+        items: nextState.current.items,
+        freeFormAdditions: nextState.current.freeFormAdditions,
+        pdfSaveFolder: nextState.pdfSaveFolder,
+        dimensionUnit: nextState.dimensionUnit ?? "cm",
+      });
 
-    showToast("ה-PDF נוצר ונפתח בהצלחה וההצעה נשמרה", "success");
+      if (result.success === false) {
+        showToast(result.error, "error");
+        return;
+      }
+
+      showToast("ה-PDF נשמר בהצלחה. התיקייה נפתחה עם הקובץ.", "success");
+    } catch (err: any) {
+      const msg = err?.message || String(err) || "שגיאה ביצוא PDF";
+      showToast(msg, "error");
+    }
+  };
+
+  const handleOpenPdfFolder = async () => {
+    const result = await openPdfSaveFolder(state.pdfSaveFolder);
+    if (result.success) {
+      showToast("התיקייה נפתחה", "success");
+    } else {
+      showToast(result.error || "לא ניתן לפתוח את התיקייה", "error");
+    }
   };
 
   // Export last quote for customer from לקוחות page
@@ -604,11 +679,18 @@ export default function App() {
   }
 
   /** ======= Settings dialog: profiles CRUD ======= */
+  const profileFormRef = useRef<HTMLDivElement>(null);
+  const addonFormRef = useRef<HTMLDivElement>(null);
+
   const [profileDraft, setProfileDraft] = useState<{
     id?: string;
     name: string;
     unitPrice: string;
   }>({ name: "", unitPrice: "" });
+
+  /** Inline edit in profiles table: which cell (profile id + field) and draft value */
+  const [editingProfileCell, setEditingProfileCell] = useState<{ id: string; field: "name" | "unitPrice" } | null>(null);
+  const [editingProfileValue, setEditingProfileValue] = useState("");
 
   /** ======= Settings dialog: addons CRUD ======= */
   const [addonDraft, setAddonDraft] = useState<{
@@ -617,14 +699,77 @@ export default function App() {
     price: string;
   }>({ name: "", price: "" });
 
+  /** Inline edit in addons table: which cell (addon id + field) and draft value */
+  const [editingAddonCell, setEditingAddonCell] = useState<{ id: string; field: "name" | "price" } | null>(null);
+  const [editingAddonValue, setEditingAddonValue] = useState("");
+
   function openSettings() {
     setState((s) => ({ ...s, ui: { ...s.ui, settingsOpen: true } }));
   }
   function closeSettings() {
     setState((s) => ({ ...s, ui: { ...s.ui, settingsOpen: false } }));
+  }
+  function openProfilesSettings() {
+    setState((s) => ({ ...s, ui: { ...s.ui, profilesSettingsOpen: true } }));
+  }
+  function closeProfilesSettings() {
+    setState((s) => ({ ...s, ui: { ...s.ui, profilesSettingsOpen: false } }));
     setProfileDraft({ name: "", unitPrice: "" });
     setAddonDraft({ name: "", price: "" });
+    setEditingProfileCell(null);
+    setEditingAddonCell(null);
   }
+
+  function startProfileCellEdit(id: string, field: "name" | "unitPrice", currentValue: string | number) {
+    setEditingProfileCell({ id, field });
+    setEditingProfileValue(field === "unitPrice" ? String(currentValue) : String(currentValue));
+  }
+
+  function commitProfileCellEdit() {
+    if (!editingProfileCell) return;
+    const { id, field } = editingProfileCell;
+    setState((s) => ({
+      ...s,
+      profiles: s.profiles.map((p) =>
+        p.id !== id
+          ? p
+          : field === "name"
+            ? { ...p, name: editingProfileValue.trim() || p.name }
+            : { ...p, unitPrice: parseLooseNumber(editingProfileValue) ?? p.unitPrice }
+      ),
+    }));
+    setEditingProfileCell(null);
+  }
+
+  function cancelProfileCellEdit() {
+    setEditingProfileCell(null);
+  }
+
+  function startAddonCellEdit(id: string, field: "name" | "price", currentValue: string) {
+    setEditingAddonCell({ id, field });
+    setEditingAddonValue(currentValue);
+  }
+
+  function commitAddonCellEdit() {
+    if (!editingAddonCell) return;
+    const { id, field } = editingAddonCell;
+    setState((s) => ({
+      ...s,
+      addons: s.addons.map((a) =>
+        a.id !== id
+          ? a
+          : field === "name"
+            ? { ...a, name: editingAddonValue.trim() || a.name }
+            : { ...a, price: editingAddonValue.trim() !== "" ? editingAddonValue : a.price }
+      ),
+    }));
+    setEditingAddonCell(null);
+  }
+
+  function cancelAddonCellEdit() {
+    setEditingAddonCell(null);
+  }
+
   function addProfile() {
     const name = profileDraft.name.trim() || `פרופיל חדש`;
     const unitPrice = parseLooseNumber(profileDraft.unitPrice) || 0;
@@ -634,8 +779,29 @@ export default function App() {
     }));
     setProfileDraft({ name: "", unitPrice: "" });
   }
+
+  /** Add a profile from the quote page dropdown; returns the new profile id and selects it. */
+  function addProfileQuick(name: string, unitPrice: number): string {
+    const trimmedName = name.trim() || `פרופיל חדש`;
+    const price = parseLooseNumber(String(unitPrice)) || 0;
+    const id = uuid();
+    setState((s) => ({
+      ...s,
+      profiles: [...s.profiles, { id, name: trimmedName, unitPrice: price }],
+    }));
+    setActiveProfileId(id);
+    setItemEditor((e) => ({
+      ...e,
+      profileId: id,
+      profileName: trimmedName,
+      unitPrice: String(price),
+    }));
+    return id;
+  }
   function editProfile(p: Profile) {
+    setAddonDraft({ name: "", price: "" }); // exit addon edit mode
     setProfileDraft({ id: p.id, name: p.name, unitPrice: String(p.unitPrice) });
+    setTimeout(() => profileFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
   function saveProfileEdit() {
     if (!profileDraft.id) return;
@@ -672,7 +838,9 @@ export default function App() {
   }
 
   function editAddon(a: Addon) {
+    setProfileDraft({ name: "", unitPrice: "" }); // exit profile edit mode
     setAddonDraft({ id: a.id, name: a.name, price: a.price });
+    setTimeout(() => addonFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
 
   function saveAddonEdit() {
@@ -776,10 +944,6 @@ export default function App() {
     showToast("תיקיית שמירה אופסה - יישמר בשולחן העבודה", "info");
   }
 
-  function isTauri(): boolean {
-    return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-  }
-
   /** ======= UI ========= */
   return (
     <div className="container-app">
@@ -824,6 +988,15 @@ export default function App() {
                 לקוחות
               </button>
             </nav>
+            <button
+              className="inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100 text-sm font-medium shadow-sm"
+              onClick={openSettings}
+              title="הגדרות"
+              aria-label="הגדרות"
+            >
+              <Settings className="w-4 h-4 shrink-0" aria-hidden />
+              <span>הגדרות</span>
+            </button>
             {state.ui.tab === "quote" && (
               <button
                 className="hidden sm:inline-flex px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
@@ -856,8 +1029,12 @@ export default function App() {
             updateCurrent={updateCurrent}
             setItemEditor={setItemEditor}
             setActiveProfileId={setActiveProfileId}
-            openSettings={openSettings}
+            openProfilesSettings={openProfilesSettings}
             onAddItem={() => addItem(itemEditor)}
+            onResetItemEditor={() => {
+              setItemEditor(initItemEditor());
+              setActiveProfileId(undefined);
+            }}
             onRemoveItem={removeItem}
             onEditItem={editItem}
             onUpdateItem={updateItem}
@@ -866,8 +1043,13 @@ export default function App() {
             onAddFreeFormAddition={addFreeFormAddition}
             onUpdateFreeFormAddition={updateFreeFormAddition}
             onRemoveFreeFormAddition={removeFreeFormAddition}
-            onSaveQuote={() => saveQuote(true)}
             onExportPdf={handleExportPdf}
+            showPdfFolderControl={isTauri()}
+            pdfSaveFolder={state.pdfSaveFolder}
+            onSelectPdfFolder={selectPdfSaveFolder}
+            onOpenPdfFolder={handleOpenPdfFolder}
+            dimensionUnit={state.dimensionUnit ?? "cm"}
+            onAddProfileQuick={addProfileQuick}
           />
         ) : (
           <CustomersPage
@@ -875,51 +1057,128 @@ export default function App() {
             quotes={state.quotes}
             onOpenLast={openLastQuoteForCustomer}
             onCreateNewOrder={startNewEmptyQuote}
-            onExportPdf={exportLastQuoteForCustomer}
+            onOpenPdfFolder={isTauri() ? handleOpenPdfFolder : undefined}
             onDeleteCustomer={deleteCustomer}
           />
         )}
 
-        {/* Settings Dialog */}
+        {/* App Settings Dialog (top bar) – PDF folder, dimension unit, data file */}
         {state.ui.settingsOpen && (
-          <Modal onClose={closeSettings} title="הגדרות — ניהול פרופילים ותוספות">
+          <Modal
+            onClose={closeSettings}
+            title={
+              <>
+                <Settings className="w-5 h-5 shrink-0 text-sky-600" aria-hidden />
+                הגדרות
+              </>
+            }
+          >
             <div className="modal-body p-3 sm:p-4 space-y-3 sm:space-y-4 overflow-y-auto max-h-[80vh]">
-              {/* PDF Save Folder Section - Moved to top for visibility */}
+              {/* Default PDF save folder – chosen folder is saved and used every time */}
               <div className="border rounded-lg p-4 bg-blue-50 border-blue-200">
                 <div className="text-base font-semibold text-slate-800 mb-2">
-                  תיקיית שמירה לקבצי PDF
+                  תיקיית ברירת מחדל לשמירת PDF
                 </div>
                 <div className="text-sm text-slate-600 mb-3">
-                  בחר תיקייה לשמירת קבצי PDF. הקבצים יאורגנו לפי שנה באופן אוטומטי.
+                  בחר תיקייה לשמירת קבצי ה-PDF. הבחירה נשמרת ותישמש בכל פתיחה של האפליקציה. הקבצים יאורגנו לפי שנה בתיקייה.
                 </div>
-                <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-slate-500 mb-1">תיקיית שמירה נוכחית:</div>
-                    <div className="text-sm text-slate-700 bg-white border rounded-lg px-3 py-2 break-all">
-                      {state.pdfSaveFolder || "שולחן העבודה (ברירת מחדל)"}
-                    </div>
-                  </div>
-                  <div className="flex gap-2 flex-shrink-0">
-                    <button
-                      className="px-4 py-2 rounded-lg bg-sky-500 text-white text-sm font-medium hover:bg-sky-600"
-                      onClick={selectPdfSaveFolder}
-                    >
-                      בחר תיקייה
-                    </button>
-                    {state.pdfSaveFolder && (
+                <div className="space-y-3">
+                  {state.pdfSaveFolder ? (
+                    <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-slate-500 mb-1">תיקייה נבחרה:</div>
+                        <div className="text-sm text-slate-700 bg-white border rounded-lg px-3 py-2 break-all">
+                          {state.pdfSaveFolder}
+                        </div>
+                      </div>
                       <button
+                        type="button"
                         className="px-4 py-2 rounded-lg bg-white border text-sm hover:bg-slate-50"
-                        onClick={clearPdfSaveFolder}
+                        onClick={selectPdfSaveFolder}
                       >
-                        איפוס
+                        שינוי תיקייה
                       </button>
-                    )}
-                  </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                      <span className="text-sm text-slate-600">לא נבחרה תיקייה</span>
+                      <button
+                        type="button"
+                        className="px-4 py-2 rounded-lg bg-sky-500 text-white text-sm hover:opacity-95"
+                        onClick={selectPdfSaveFolder}
+                      >
+                        בחר תיקייה
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="text-sm sm:text-base text-slate-600">
+              {/* Dimension unit: cm or mm */}
+              <div className="border rounded-lg p-4 bg-slate-50 border-slate-200">
+                <div className="text-base font-semibold text-slate-800 mb-2">
+                  יחידת מידות (רוחב × גובה)
+                </div>
+                <div className="text-sm text-slate-600 mb-3">
+                  בחר באיזו יחידה להציג ולהזין מידות במחשבון ובטבלת הפריטים.
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="dimensionUnit"
+                      checked={(state.dimensionUnit ?? "cm") === "cm"}
+                      onChange={() => setState((s) => ({ ...s, dimensionUnit: "cm" }))}
+                      className="w-4 h-4"
+                    />
+                    <span>ס״מ (סנטימטרים)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="dimensionUnit"
+                      checked={(state.dimensionUnit ?? "cm") === "mm"}
+                      onChange={() => setState((s) => ({ ...s, dimensionUnit: "mm" }))}
+                      className="w-4 h-4"
+                    />
+                    <span>מ״מ (מילימטרים)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* App data file location (Tauri) */}
+              {isTauri() && (
+                <DataFileLocation />
+              )}
+            </div>
+            <div className="p-3 border-t flex flex-wrap gap-2">
+              <button
+                className="px-4 py-2 rounded-lg bg-slate-800 text-white"
+                onClick={closeSettings}
+              >
+                שמירה ויציאה
+              </button>
+            </div>
+          </Modal>
+        )}
+
+        {/* Profiles & Addons Settings Dialog (beside מחשבון פריט) */}
+        {state.ui.profilesSettingsOpen && (
+          <Modal
+            onClose={closeProfilesSettings}
+            title={
+              <>
+                <Settings className="w-5 h-5 shrink-0 text-sky-600" aria-hidden />
+                הגדרות — ניהול פרופילים ותוספות
+              </>
+            }
+          >
+            <div className="modal-body p-3 sm:p-4 space-y-3 sm:space-y-4 overflow-y-auto max-h-[80vh]">
+              <div ref={profileFormRef} className="text-sm sm:text-base text-slate-600">
                 הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר.
+                {profileDraft.id && (
+                  <span className="mr-2 inline-block mt-1 text-sky-600 font-medium">— מעריכים פרופיל</span>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
@@ -987,18 +1246,57 @@ export default function App() {
                     ) : (
                       state.profiles.map((p) => (
                         <tr key={p.id} className="border-t">
-                          <TdSettings>{p.name}</TdSettings>
                           <TdSettings>
-                            {fmtCurrency.format(p.unitPrice)}
+                            {editingProfileCell?.id === p.id && editingProfileCell?.field === "name" ? (
+                              <input
+                                type="text"
+                                className="w-full min-w-[80px] px-2 py-1 border rounded text-sm bg-white text-right"
+                                value={editingProfileValue}
+                                onChange={(e) => setEditingProfileValue(e.target.value)}
+                                onBlur={commitProfileCellEdit}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") commitProfileCellEdit();
+                                  if (e.key === "Escape") cancelProfileCellEdit();
+                                }}
+                                autoFocus
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="w-full text-right min-h-[28px] px-2 py-1 rounded hover:bg-slate-100"
+                                onClick={() => startProfileCellEdit(p.id, "name", p.name)}
+                              >
+                                {p.name}
+                              </button>
+                            )}
+                          </TdSettings>
+                          <TdSettings>
+                            {editingProfileCell?.id === p.id && editingProfileCell?.field === "unitPrice" ? (
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                className="w-full min-w-[80px] px-2 py-1 border rounded text-sm bg-white text-right"
+                                value={editingProfileValue}
+                                onChange={(e) => setEditingProfileValue(e.target.value)}
+                                onBlur={commitProfileCellEdit}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") commitProfileCellEdit();
+                                  if (e.key === "Escape") cancelProfileCellEdit();
+                                }}
+                                autoFocus
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="w-full text-right min-h-[28px] px-2 py-1 rounded hover:bg-slate-100"
+                                onClick={() => startProfileCellEdit(p.id, "unitPrice", p.unitPrice)}
+                              >
+                                {fmtCurrency.format(p.unitPrice)}
+                              </button>
+                            )}
                           </TdSettings>
                           <TdSettings>
                             <div className="flex flex-wrap gap-1 sm:gap-2">
-                              <button
-                                className="px-2 sm:px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50 text-xs sm:text-sm"
-                                onClick={() => editProfile(p)}
-                              >
-                                עריכה
-                              </button>
                               <button
                                 className="px-2 sm:px-3 py-1.5 rounded-md bg-red-600 text-white text-xs sm:text-sm"
                                 onClick={() => deleteProfile(p.id)}
@@ -1016,8 +1314,11 @@ export default function App() {
 
               {/* Addons Management Section */}
               <div className="border-t pt-4 mt-4">
-                <div className="text-sm text-slate-600 mb-3">
+                <div ref={addonFormRef} className="text-sm text-slate-600 mb-3">
                   הוספה/עריכה של תוספות (מחיר ליח׳) - יופיעו במחשבון הפריט.
+                  {addonDraft.id && (
+                    <span className="mr-2 inline-block mt-1 text-sky-600 font-medium">— מעריכים תוספת</span>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3 mb-3">
@@ -1085,16 +1386,57 @@ export default function App() {
                       ) : (
                         state.addons.map((a) => (
                           <tr key={a.id} className="border-t">
-                            <TdSettings>{a.name}</TdSettings>
-                            <TdSettings>{fmtCurrency.format(parseLooseNumber(a.price))}</TdSettings>
+                            <TdSettings>
+                              {editingAddonCell?.id === a.id && editingAddonCell?.field === "name" ? (
+                                <input
+                                  type="text"
+                                  className="w-full min-w-[80px] px-2 py-1 border rounded text-sm bg-white"
+                                  value={editingAddonValue}
+                                  onChange={(e) => setEditingAddonValue(e.target.value)}
+                                  onBlur={commitAddonCellEdit}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") commitAddonCellEdit();
+                                    if (e.key === "Escape") cancelAddonCellEdit();
+                                  }}
+                                  autoFocus
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="w-full text-right min-h-[28px] px-2 py-1 rounded hover:bg-slate-100"
+                                  onClick={() => startAddonCellEdit(a.id, "name", a.name)}
+                                >
+                                  {a.name}
+                                </button>
+                              )}
+                            </TdSettings>
+                            <TdSettings>
+                              {editingAddonCell?.id === a.id && editingAddonCell?.field === "price" ? (
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  className="w-full min-w-[80px] px-2 py-1 border rounded text-sm bg-white"
+                                  value={editingAddonValue}
+                                  onChange={(e) => setEditingAddonValue(e.target.value)}
+                                  onBlur={commitAddonCellEdit}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") commitAddonCellEdit();
+                                    if (e.key === "Escape") cancelAddonCellEdit();
+                                  }}
+                                  autoFocus
+                                />
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="w-full text-right min-h-[28px] px-2 py-1 rounded hover:bg-slate-100"
+                                  onClick={() => startAddonCellEdit(a.id, "price", a.price)}
+                                >
+                                  {fmtCurrency.format(parseLooseNumber(a.price))}
+                                </button>
+                              )}
+                            </TdSettings>
                             <TdSettings>
                               <div className="flex flex-wrap gap-1 sm:gap-2">
-                                <button
-                                  className="px-2 sm:px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50 text-xs sm:text-sm"
-                                  onClick={() => editAddon(a)}
-                                >
-                                  עריכה
-                                </button>
                                 <button
                                   className="px-2 sm:px-3 py-1.5 rounded-md bg-red-600 text-white text-xs sm:text-sm"
                                   onClick={() => deleteAddon(a.id)}
@@ -1114,9 +1456,9 @@ export default function App() {
             <div className="p-3 border-t flex flex-wrap gap-2">
               <button
                 className="px-4 py-2 rounded-lg bg-slate-800 text-white"
-                onClick={closeSettings}
+                onClick={closeProfilesSettings}
               >
-                סגירה
+                שמירה ויציאה
               </button>
             </div>
           </Modal>
@@ -1184,13 +1526,36 @@ function TdSettings({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Shows where the app data file is stored (Tauri only) */
+function DataFileLocation() {
+  const [path, setPath] = useState<string | null>(null);
+  useEffect(() => {
+    getDataFilePath().then(setPath);
+  }, []);
+  return (
+    <div className="border rounded-lg p-4 bg-slate-50 border-slate-200">
+      <div className="text-base font-semibold text-slate-800 mb-2">
+        קובץ נתוני האפליקציה
+      </div>
+      <div className="text-sm text-slate-600 mb-2">
+        כל הנתונים (לקוחות, הצעות, פרופילים, תוספות והגדרות) נשמרים אוטומטית בקובץ אחד בתיקיית האפליקציה.
+      </div>
+      {path && (
+        <div className="text-xs text-slate-500 bg-white border rounded-lg px-3 py-2 break-all font-mono">
+          {path}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Modal */
 function Modal({
   title,
   onClose,
   children,
 }: {
-  title: string;
+  title: React.ReactNode;
   onClose: () => void;
   children: React.ReactNode;
 }) {
@@ -1209,7 +1574,7 @@ function Modal({
     >
       <div className="modal-panel card" onClick={(e) => e.stopPropagation()}>
         <div className="px-4 py-3 border-b flex items-center justify-between">
-          <h3 className="text-base font-semibold">{title}</h3>
+          <h3 className="text-base font-semibold flex items-center gap-2">{title}</h3>
           <button
             className="px-3 py-1.5 rounded-md bg-white border hover:bg-slate-50"
             onClick={onClose}
