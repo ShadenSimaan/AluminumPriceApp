@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Settings } from "lucide-react";
 import { exportQuotePdf, openPdfSaveFolder } from "./pdfExporter";
-import { AppState, Customer, LineItem, Profile, FreeFormAddition, Addon } from "./types";
+import { AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, NotesPreset } from "./types";
 import { readStateFromFile, writeStateToFile, isTauri, getDataFilePath } from "./storage";
 import QuotePage from "./QuotePage";
 import CustomersPage from "./CustomersPage";
@@ -69,12 +69,17 @@ function createAddonsFromGlobal(globalAddons: Addon[]): Addon[] {
   return globalAddons.map((a) => ({ ...a, checked: false }));
 }
 
+const defaultNotesPresets: NotesPreset[] = [
+  { id: "preset-1", label: "תשלום 14 יום", text: "תשלום בתוך 14 יום.\nמשלוח בהתאם להזמנה." },
+];
+
 /** ===== Default state ===== */
 const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
   profiles: defaultProfiles,
   addons: defaultAddonsPreset.map((a) => ({ ...a })),
+  notesPresets: defaultNotesPresets,
   current: {
     customerName: "",
     customerPhone: "",
@@ -103,6 +108,16 @@ function normalizeState(obj: unknown): AppState {
     Array.isArray(o.addons) && o.addons.length > 0
       ? o.addons
       : defaultAddonsPreset.map((a) => ({ ...a }));
+  const notesPresets: NotesPreset[] =
+    Array.isArray(o.notesPresets) && o.notesPresets.length > 0
+      ? o.notesPresets
+          .map((p: any) => ({
+            id: typeof p.id === "string" ? p.id : uuid(),
+            label: String(p.label ?? ""),
+            text: String(p.text ?? ""),
+          }))
+          .filter((p) => p.label.trim() || p.text.trim())
+      : defaultNotesPresets;
   const currentRaw: any = o.current ?? {};
   const current = {
     customerName: String(currentRaw.customerName ?? ""),
@@ -124,7 +139,7 @@ function normalizeState(obj: unknown): AppState {
   };
   const pdfSaveFolder = typeof o.pdfSaveFolder === "string" ? o.pdfSaveFolder : undefined;
   const dimensionUnit = o.dimensionUnit === "mm" ? "mm" : "cm";
-  return { customers, quotes, profiles, addons, current, ui, pdfSaveFolder, dimensionUnit };
+  return { customers, quotes, profiles, addons, notesPresets, current, ui, pdfSaveFolder, dimensionUnit };
 }
 
 /** ===== Validate + migrate any LS object to the proper shape ===== */
@@ -453,6 +468,13 @@ export default function App() {
     });
   }
 
+  function reorderFreeFormAdditions(reordered: FreeFormAddition[]) {
+    setState((s) => ({
+      ...s,
+      current: { ...s.current, freeFormAdditions: reordered },
+    }));
+  }
+
   function addFreeFormAddition() {
     const newAddition: FreeFormAddition = {
       id: uuid(),
@@ -499,6 +521,8 @@ export default function App() {
   function startNewEmptyQuote() {
     setState((s) => {
       const { nextState } = saveQuoteToState(s);
+      const defaultNotes =
+        nextState.notesPresets.length > 0 ? nextState.notesPresets[0].text : "";
       const emptyCurrent = {
         customerName: "",
         customerPhone: "",
@@ -507,7 +531,7 @@ export default function App() {
         title: "הצעת מחיר",
         items: [] as LineItem[],
         freeFormAdditions: [] as FreeFormAddition[],
-        notes: "",
+        notes: defaultNotes,
         taxPercentText: "18",
       };
       return {
@@ -944,21 +968,58 @@ export default function App() {
     showToast("תיקיית שמירה אופסה - יישמר בשולחן העבודה", "info");
   }
 
+  /** ======= Settings: Notes presets (הערות למסמך) ======= */
+  const [notesPresetDraft, setNotesPresetDraft] = useState<{
+    id?: string;
+    label: string;
+    text: string;
+  }>({ label: "", text: "" });
+
+  function addNotesPreset() {
+    const label = notesPresetDraft.label.trim() || "הערה חדשה";
+    const text = notesPresetDraft.text.trim() || "";
+    setState((s) => ({
+      ...s,
+      notesPresets: [...s.notesPresets, { id: uuid(), label, text }],
+    }));
+    setNotesPresetDraft({ label: "", text: "" });
+  }
+
+  function updateNotesPreset(id: string, updated: { label: string; text: string }) {
+    setState((s) => ({
+      ...s,
+      notesPresets: s.notesPresets.map((p) =>
+        p.id === id
+          ? { ...p, label: updated.label.trim() || p.label, text: updated.text }
+          : p
+      ),
+    }));
+    setNotesPresetDraft({ label: "", text: "" });
+  }
+
+  function deleteNotesPreset(id: string) {
+    setState((s) => ({
+      ...s,
+      notesPresets: s.notesPresets.filter((p) => p.id !== id),
+    }));
+    if (notesPresetDraft.id === id) setNotesPresetDraft({ label: "", text: "" });
+  }
+
   /** ======= UI ========= */
   return (
     <div className="container-app">
-      <main className="w-full max-w-[1160px] flex flex-col gap-4 px-2">
+      <main className="w-full min-w-0 max-w-[1160px] flex flex-col gap-4 px-2">
         {/* Top Bar */}
-        <header className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="h-9 w-9 shrink-0 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">
               א
             </div>
-            <h1 className="text-2xl sm:text-3xl font-semibold">
+            <h1 className="text-2xl sm:text-3xl font-semibold min-w-0 break-words">
               הצעת מחיר — אלום סמעאן סאמי
             </h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
               <button
                 className={`px-3 py-1.5 rounded-lg text-sm ${
@@ -1043,6 +1104,7 @@ export default function App() {
             onAddFreeFormAddition={addFreeFormAddition}
             onUpdateFreeFormAddition={updateFreeFormAddition}
             onRemoveFreeFormAddition={removeFreeFormAddition}
+            onReorderFreeFormAdditions={reorderFreeFormAdditions}
             onExportPdf={handleExportPdf}
             showPdfFolderControl={isTauri()}
             pdfSaveFolder={state.pdfSaveFolder}
@@ -1143,6 +1205,83 @@ export default function App() {
                     />
                     <span>מ״מ (מילימטרים)</span>
                   </label>
+                </div>
+              </div>
+
+              {/* Notes presets – default הערות למסמך options */}
+              <div className="border rounded-lg p-4 bg-amber-50/80 border-amber-200">
+                <div className="text-base font-semibold text-slate-800 mb-2">
+                  ברירות מחדל להערות למסמך
+                </div>
+                <div className="text-sm text-slate-600 mb-3">
+                  הוסף הערות מוכנות לבחירה. בעת פתיחת הצעה חדשה יוטמע ההערה הראשונה אוטומטית; ניתן גם לבחור הערה מהרשימה בשדה &quot;הערות למסמך&quot; בהצעה.
+                </div>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <SettingsInput
+                      label="כותרת (לבחירה מהרשימה)"
+                      value={notesPresetDraft.label}
+                      onChange={(v) =>
+                        setNotesPresetDraft((d) => ({ ...d, label: v }))
+                      }
+                    />
+                    <div className="sm:col-span-2">
+                      <label className="grid gap-1.5 w-full">
+                        <span className="text-sm text-slate-700">טקסט ההערה</span>
+                        <textarea
+                          className="w-full rounded-md bg-white border border-slate-300 px-3 py-2 min-h-[80px]"
+                          value={notesPresetDraft.text}
+                          onChange={(e) =>
+                            setNotesPresetDraft((d) => ({ ...d, text: e.target.value }))
+                          }
+                          placeholder="תשלום בתוך 14 יום..."
+                          rows={3}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="px-4 py-2 rounded-lg bg-sky-500 text-white text-sm hover:opacity-95"
+                      onClick={addNotesPreset}
+                    >
+                      הוסף ברירת מחדל
+                    </button>
+                  </div>
+                  {state.notesPresets.length > 0 && (
+                    <div className="border rounded-lg overflow-hidden bg-white">
+                      <div className="text-xs font-medium text-slate-500 px-3 py-2 border-b bg-slate-50">
+                        הרשימה (הראשונה תוטמע בהצעה חדשה)
+                      </div>
+                      <ul className="divide-y max-h-48 overflow-y-auto">
+                        {state.notesPresets.map((p) => (
+                          <li
+                            key={p.id}
+                            className="px-3 py-2 flex flex-wrap items-start justify-between gap-2"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <span className="font-medium text-slate-800">
+                                {p.label || "(ללא כותרת)"}
+                              </span>
+                              {p.text && (
+                                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
+                                  {p.text.replace(/\n/g, " ")}
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="px-2 py-1 rounded-md bg-red-100 text-red-700 text-xs hover:bg-red-200"
+                              onClick={() => deleteNotesPreset(p.id)}
+                            >
+                              מחק
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               </div>
 

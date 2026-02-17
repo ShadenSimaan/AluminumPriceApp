@@ -1,7 +1,7 @@
 // FILE: src/QuotePage.tsx
 import React, { useMemo } from "react";
 import { Settings } from "lucide-react";
-import { AppState, LineItem } from "./types";
+import { AppState, LineItem, FreeFormAddition } from "./types";
 import {
   Select,
   SelectContent,
@@ -55,6 +55,7 @@ type QuotePageProps = {
   onAddFreeFormAddition: () => void;
   onUpdateFreeFormAddition: (id: string, updated: any) => void;
   onRemoveFreeFormAddition: (id: string) => void;
+  onReorderFreeFormAdditions: (reordered: FreeFormAddition[]) => void;
   onExportPdf: () => void;
   /** When true, show PDF save folder control beside export button (Tauri only) */
   showPdfFolderControl?: boolean;
@@ -93,6 +94,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
   onAddFreeFormAddition,
   onUpdateFreeFormAddition,
   onRemoveFreeFormAddition,
+  onReorderFreeFormAdditions,
   onExportPdf,
   showPdfFolderControl,
   pdfSaveFolder,
@@ -106,7 +108,6 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const [addProfileDraft, setAddProfileDraft] = React.useState({ name: "", unitPrice: "" });
   const [editDraft, setEditDraft] = React.useState<LineItem | null>(null);
   const [editActiveProfileId, setEditActiveProfileId] = React.useState<string | undefined>(undefined);
-  const [draggedItemId, setDraggedItemId] = React.useState<string | null>(null);
   const [showAddItemModal, setShowAddItemModal] = React.useState(false);
   const [addItemModalContentEl, setAddItemModalContentEl] = React.useState<HTMLDivElement | null>(null);
   const [editItemModalContentEl, setEditItemModalContentEl] = React.useState<HTMLDivElement | null>(null);
@@ -122,6 +123,56 @@ const QuotePage: React.FC<QuotePageProps> = ({
   /** Inline edit for free-form additions: which cell (addon id + field) and draft value */
   const [editingFreeFormCell, setEditingFreeFormCell] = React.useState<{ id: string; field: "name" | "price" | "qty" } | null>(null);
   const [editingFreeFormValue, setEditingFreeFormValue] = React.useState("");
+  /** Pointer-based drag: type + id + label for preview, and cursor position for floating card */
+  const [dragState, setDragState] = React.useState<{
+    type: "item" | "freeform";
+    id: string;
+    label: string;
+  } | null>(null);
+  const [dragPreviewPos, setDragPreviewPos] = React.useState<{ x: number; y: number } | null>(null);
+  const itemsRef = React.useRef(state.current.items);
+  const freeFormRef = React.useRef(state.current.freeFormAdditions);
+  itemsRef.current = state.current.items;
+  freeFormRef.current = state.current.freeFormAdditions;
+
+  React.useEffect(() => {
+    if (!dragState) return;
+    const onMove = (e: PointerEvent) => setDragPreviewPos({ x: e.clientX, y: e.clientY });
+    const onUp = (e: PointerEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const tr = el?.closest("tr[data-drag-row]");
+      const targetId = tr?.getAttribute(dragState.type === "item" ? "data-item-id" : "data-freeform-id") ?? null;
+      if (targetId && targetId !== dragState.id) {
+        if (dragState.type === "item") {
+          const items = [...itemsRef.current];
+          const fromIdx = items.findIndex((i) => i.id === dragState.id);
+          const toIdx = items.findIndex((i) => i.id === targetId);
+          if (fromIdx !== -1 && toIdx !== -1) {
+            const [removed] = items.splice(fromIdx, 1);
+            items.splice(toIdx, 0, removed);
+            updateCurrent("items", items);
+          }
+        } else {
+          const list = [...freeFormRef.current];
+          const fromIdx = list.findIndex((a) => a.id === dragState.id);
+          const toIdx = list.findIndex((a) => a.id === targetId);
+          if (fromIdx !== -1 && toIdx !== -1) {
+            const [removed] = list.splice(fromIdx, 1);
+            list.splice(toIdx, 0, removed);
+            onReorderFreeFormAdditions(list);
+          }
+        }
+      }
+      setDragState(null);
+      setDragPreviewPos(null);
+    };
+    window.addEventListener("pointermove", onMove, { capture: true });
+    window.addEventListener("pointerup", onUp, { capture: true });
+    return () => {
+      window.removeEventListener("pointermove", onMove, { capture: true });
+      window.removeEventListener("pointerup", onUp, { capture: true });
+    };
+  }, [dragState, updateCurrent, onReorderFreeFormAdditions]);
 
   React.useEffect(() => {
     if (showAddItemModal) onResetItemEditor?.();
@@ -270,7 +321,20 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const grandTotal = totalSubTotal + taxValue;
 
   return (
-    <section className="grid gap-4">
+    <section className="grid gap-4 min-w-0 w-full">
+      {/* Floating drag preview — follows cursor when reordering */}
+      {dragState && (
+        <div
+          dir="rtl"
+          className="fixed z-[99999] pointer-events-none text-sm font-semibold text-slate-800 bg-white rounded-xl shadow-lg border-2 border-sky-400 px-4 py-2 whitespace-nowrap"
+          style={{
+            left: (dragPreviewPos?.x ?? 0) + 12,
+            top: (dragPreviewPos?.y ?? 0) + 12,
+          }}
+        >
+          {dragState.label} — גרור לסידור
+        </div>
+      )}
       {/* Customer inline form */}
       <section className="card p-4 w-full">
         <h2 className="text-xl font-semibold mb-3">פרטי לקוח</h2>
@@ -642,14 +706,25 @@ const QuotePage: React.FC<QuotePageProps> = ({
           </span>
         </div>
         <div className="table-scroll">
-          <table className="table-inner-min w-full text-sm">
+          <table className="table-inner-min table-quote-items w-full text-sm">
+            <colgroup>
+              <col style={{ width: "2.5rem" }} />
+              <col style={{ width: "10rem" }} />
+              <col style={{ width: "5rem" }} />
+              <col style={{ width: "10rem" }} />
+              <col style={{ width: "12rem" }} />
+              <col style={{ width: "4.5rem" }} />
+              <col style={{ width: "3rem" }} />
+              <col style={{ width: "4.5rem" }} />
+              <col style={{ width: "3.5rem" }} />
+            </colgroup>
             <thead>
               <tr className="border-b bg-slate-50">
                 <Th>מס׳</Th>
-                <Th>פרופיל</Th>
+                <Th className="td-wrap-col">פרופיל</Th>
                 <Th>{dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)"}</Th>
-                <Th>מיקום</Th>
-                <Th>פרטים</Th>
+                <Th className="td-wrap-col">מיקום</Th>
+                <Th className="td-details-col">פרטים</Th>
                 <Th>מחיר ליח׳</Th>
                 <Th>כמות</Th>
                 <Th>סה״כ</Th>
@@ -693,43 +768,27 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     .join(" • ");
 
                   return (
-                    <tr 
-                      key={it.id} 
-                      className={`border-b ${draggedItemId === it.id ? "opacity-50" : ""}`}
-                      draggable
-                      onDragStart={(e) => {
-                        setDraggedItemId(it.id);
-                        e.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        if (draggedItemId && draggedItemId !== it.id) {
-                          const draggedIdx = state.current.items.findIndex((item) => item.id === draggedItemId);
-                          const targetIdx = idx;
-                          if (draggedIdx !== -1) {
-                            const items = [...state.current.items];
-                            const [draggedItem] = items.splice(draggedIdx, 1);
-                            items.splice(targetIdx, 0, draggedItem);
-                            updateCurrent("items", items);
-                          }
-                        }
-                        setDraggedItemId(null);
-                      }}
-                      onDragEnd={() => setDraggedItemId(null)}
+                    <tr
+                      key={it.id}
+                      data-drag-row="item"
+                      data-item-id={it.id}
+                      className={`border-b ${dragState?.type === "item" && dragState?.id === it.id ? "opacity-50" : ""}`}
                     >
                       <Td>
-                        <div className="flex items-center gap-2">
-                          <span className="cursor-move text-slate-400 hover:text-slate-600 select-none" title="גרור לסידור מחדש" draggable={false}>
-                            ⋮⋮
-                          </span>
+                        <div
+                          className="flex items-center gap-2 cursor-grab active:cursor-grabbing select-none"
+                          title="גרור לסידור מחדש"
+                            onPointerDown={(e) => {
+                              if (e.button !== 0) return;
+                              setDragState({ type: "item", id: it.id, label: it.profileName || `פריט ${idx + 1}` });
+                              setDragPreviewPos({ x: e.clientX, y: e.clientY });
+                            }}
+                        >
+                          <span className="text-slate-400 hover:text-slate-600">⋮⋮</span>
                           <span>{idx + 1}</span>
                         </div>
                       </Td>
-                      <Td>
+                      <Td className="td-wrap-col">
                         {editingCell?.itemId === it.id && editingCell?.field === "profile" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -794,7 +853,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           </EditableCellButton>
                         )}
                       </Td>
-                      <Td>
+                      <Td className="td-wrap-col">
                         {editingCell?.itemId === it.id && editingCell?.field === "location" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -815,7 +874,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           </EditableCellButton>
                         )}
                       </Td>
-                      <Td>
+                      <Td className="td-details-col">
                         {editingCell?.itemId === it.id && editingCell?.field === "details" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -1033,8 +1092,26 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       setEditingFreeFormCell(null);
                     };
                     return (
-                      <tr key={add.id} className="border-b">
-                        <Td>{idx + 1}</Td>
+                      <tr
+                        key={add.id}
+                        data-drag-row="freeform"
+                        data-freeform-id={add.id}
+                        className={`border-b ${dragState?.type === "freeform" && dragState?.id === add.id ? "opacity-50" : ""}`}
+                      >
+                        <Td>
+                          <div
+                            className="flex items-center gap-2 cursor-grab active:cursor-grabbing select-none"
+                            title="גרור לסידור מחדש"
+                            onPointerDown={(e) => {
+                              if (e.button !== 0) return;
+                              setDragState({ type: "freeform", id: add.id, label: add.name || `תוספת ${idx + 1}` });
+                              setDragPreviewPos({ x: e.clientX, y: e.clientY });
+                            }}
+                          >
+                            <span className="text-slate-400 hover:text-slate-600">⋮⋮</span>
+                            <span>{idx + 1}</span>
+                          </div>
+                        </Td>
                         <Td>
                           {isEditing("name") ? (
                             <EditableCellInput
@@ -1158,6 +1235,23 @@ const QuotePage: React.FC<QuotePageProps> = ({
 
         {/* Footer notes - moved above date */}
         <div className="mt-4">
+          {state.notesPresets && state.notesPresets.length > 0 && (
+            <div className="mb-2">
+              <span className="text-sm text-slate-600 mr-2">בחר ברירת מחדל:</span>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {state.notesPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className="px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 text-sm hover:bg-slate-200"
+                    onClick={() => updateCurrent("notes", preset.text)}
+                  >
+                    {preset.label || preset.text.slice(0, 20) + (preset.text.length > 20 ? "…" : "")}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <LabeledInput
             label="הערות למסמך (יופיעו ב-PDF)"
             value={state.current.notes}
@@ -1404,7 +1498,7 @@ function EditableCellButton({
   return (
     <button
       type="button"
-      className="text-right w-full hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 min-h-[1.5rem]"
+      className="text-right w-full min-w-0 hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 min-h-[1.5rem] break-words"
       onClick={onClick}
       title={title}
     >
@@ -1566,16 +1660,16 @@ function Stat({
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <th className="text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap">
+    <th className={`text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap ${className ?? ""}`}>
       {children}
     </th>
   );
 }
-function Td({ children }: { children: React.ReactNode }) {
+function Td({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <td className="text-right px-3 py-2 align-top whitespace-nowrap">
+    <td className={`text-right px-3 py-2 align-top whitespace-nowrap ${className ?? ""}`}>
       {children}
     </td>
   );

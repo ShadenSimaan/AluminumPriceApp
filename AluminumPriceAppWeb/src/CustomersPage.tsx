@@ -41,7 +41,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
   );
 
   return (
-    <section className="grid gap-4">
+    <section className="grid gap-4 min-w-0 w-full">
       <div className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3">
           <h2 className="text-lg font-semibold">לקוחות</h2>

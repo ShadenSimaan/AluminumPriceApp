@@ -461,293 +461,21 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     return { success: false, error: "ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF." };
   }
 
-  let jsPDFMod: any;
+  // Use pdf-lib for PDF generation - proper Unicode/Hebrew support (embeds font from CDN, no local fonts needed)
+  let pdfArrayBuffer: ArrayBuffer;
   try {
-    jsPDFMod = await import("jspdf");
-  } catch (e) {
-    return { success: false, error: "חסרות חבילות PDF. התקן/י: npm i jspdf" };
-  }
-  const jsPDF = jsPDFMod.default || jsPDFMod;
-
-  const doc = new jsPDF({
-    orientation: "portrait",
-    unit: "pt",
-    format: "a4",
-  });
-
-  const hebrewOk = await ensureHebrewFont(doc);
-  let pdfFontName = hebrewOk ? PDF_FONT_NAME : "Helvetica";
-  setPdfBold(doc, hebrewOk);
-
-  // If the custom font has no usable metrics (jsPDF 'widths' undefined), fall back to Helvetica so export doesn't throw
-  if (pdfFontName === PDF_FONT_NAME) {
-    try {
-      doc.getTextWidth(" ");
-    } catch {
-      pdfFontName = "Helvetica";
-      doc.setFont("Helvetica", "bold");
-    }
-  }
-
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const marginX = 40;
-  const marginTop = 40;
-  const marginBottom = 40;
-
-  let cursorY = marginTop;
-
-  // ===== Header =====
-  const headerLines = [
-    "אלום סמעאן סאמי",
-    "ביצוע עבודות אלומיניום ותריס",
-    "פסוטה   ת.ד 528             טל/פקס : 9870933          נייד0526475531",
-    "ע.מ. מס' 023107659",
-  ];
-
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(18);
-  headerLines.forEach((line) => {
-    drawTextSmart(doc, line, pageWidth / 2, cursorY, {
-      align: "center",
-      forceRtl: true,
-    });
-    cursorY += 22;
-  });
-
-  cursorY += 12;
-
-  // ===== Customer block =====
-  const customerNameWithPrefix = customerName.trim() 
-    ? (customerName.trim().startsWith("לכבוד") ? customerName : `לכבוד ${customerName}`)
-    : "";
-  
-  // Customer name - "לכבוד" and name on same line, underline only under name
-  if (customerNameWithPrefix) {
-    doc.setFont(pdfFontName, "bold");
-    doc.setFontSize(16);
-    const nameX = pageWidth - marginX; // Right side
-    
-    // Extract just the name part (without "לכבוד ")
-    const customerNameOnly = customerNameWithPrefix.startsWith("לכבוד ")
-      ? customerNameWithPrefix.replace(/^לכבוד\s+/, "")
-      : customerNameWithPrefix;
-    
-    // Calculate widths BEFORE drawing
-    const lekavodText = "לכבוד";
-    const spaceText = " ";
-    const lekavodWidth = doc.getTextWidth(lekavodText);
-    const spaceWidth = doc.getTextWidth(spaceText);
-    const nameWidth = doc.getTextWidth(customerNameOnly);
-    
-    // Draw full text together for proper alignment
-    const fullText = `${lekavodText}${spaceText}${customerNameOnly}`;
-    drawTextSmart(doc, fullText, nameX, cursorY, {
-      align: "right",
-      forceRtl: true,
-    });
-    
-    // Draw underline ONLY under the customer name
-    // For RTL right-aligned text at position nameX:
-    // - Full text spans from (nameX - fullTextWidth) to nameX
-    // - "לכבוד " spans from (nameX - lekavodWidth - spaceWidth) to nameX  
-    // - Name spans from (nameX - fullTextWidth) to (nameX - lekavodWidth - spaceWidth)
-    const fullTextWidth = lekavodWidth + spaceWidth + nameWidth;
-    const nameStartX = nameX - fullTextWidth; // Left edge of name
-    const nameEndX = nameX - lekavodWidth - spaceWidth; // Right edge of name
-    
-    doc.setDrawColor(0, 0, 0);
-    doc.setLineWidth(0.8); // Thinner underline
-    doc.line(nameStartX, cursorY + 6, nameEndX, cursorY + 6);
-    
-    cursorY += 24;
-  }
-  
-  // Phone and email - bold, right-aligned
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(13);
-  if (customerPhone?.trim()) {
-    drawTextSmart(doc, customerPhone, pageWidth - marginX, cursorY, {
-      align: "right",
-      forceRtl: false,
-    });
-    cursorY += 19;
-  }
-  if (customerEmail?.trim()) {
-    drawTextSmart(doc, customerEmail, pageWidth - marginX, cursorY, {
-      align: "right",
-      forceRtl: false,
-    });
-    cursorY += 19;
-  }
-
-  // Divider
-  doc.setDrawColor(200);
-  doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
-  cursorY += 12;
-
-  // ===== Items table =====
-  cursorY = drawItemsTable(
-    doc,
-    payload.items,
-    payload.freeFormAdditions || [],
-    cursorY,
-    marginX,
-    pageWidth,
-    pageHeight,
-    marginTop,
-    marginBottom,
-    payload.dimensionUnit ?? "cm",
-    pdfFontName
-  );
-
-  // ===== Totals box on LEFT, but text still RTL / right-aligned =====
-  const sub = payload.items.reduce((sum, it) => {
-    if (typeof it.subtotal === "number") return sum + it.subtotal;
-    const w = parseLooseNumber(it.widthCm);
-    const h = parseLooseNumber(it.heightCm);
-    const qty = Math.max(0, parseLooseNumber(it.qty));
-    const area = (w * h) / 10000;
-    const addonsSum = it.addons.reduce(
-      (s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0),
-      0
+    const { buildQuotePdfBytes } = await import("./buildPdfWithPdfLib");
+    const pdfBytes = await buildQuotePdfBytes(payload);
+    pdfArrayBuffer = pdfBytes.buffer.slice(
+      pdfBytes.byteOffset,
+      pdfBytes.byteOffset + pdfBytes.byteLength
     );
-    const manual = (it.manualUnitPrice ?? "").trim();
-    const perItem = manual
-      ? parseLooseNumber(manual) + addonsSum
-      : area * parseLooseNumber(it.unitPrice) + addonsSum;
-    return sum + perItem * qty;
-  }, 0);
-
-  // Add free-form additions to subtotal
-  const freeFormSub = (payload.freeFormAdditions || []).reduce((sum, add) => {
-    const price = parseLooseNumber(add.price);
-    const qty = Math.max(0, parseLooseNumber(add.qty));
-    return sum + price * qty;
-  }, 0);
-  const totalSub = sub + freeFormSub;
-
-  const taxDecimal = normalizeTaxPercent(
-    parseLooseNumber(payload.taxPercentText)
-  );
-  const vat = totalSub * taxDecimal;
-  const grand = totalSub + vat;
-
-  const boxWidth = 260;
-  const boxX = marginX; // left side of page
-  let boxY = cursorY + 18;
-
-  doc.setDrawColor(210);
-  doc.setLineWidth(0.3);
-  doc.roundedRect(boxX, boxY, boxWidth, 96, 8, 8);
-  boxY += 26;
-
-    // Note: text is still right-aligned inside the box (RTL)
-    doc.setFont(pdfFontName, "bold");
-    doc.setFontSize(13);
-    drawTextSmart(
-      doc,
-      `מחיר: ${formatMoneyPdf(totalSub)}`,
-      boxX + boxWidth - 12,
-      boxY,
-      { align: "right" }
-    );
-  boxY += 26;
-  drawTextSmart(
-    doc,
-    `מע״מ: ${formatMoneyPdf(vat)}`,
-    boxX + boxWidth - 12,
-    boxY,
-    { align: "right" }
-  );
-  boxY += 28;
-
-  // highlighted grand total
-  doc.setFillColor(236, 248, 255); // Match the table header blue color
-  doc.roundedRect(boxX + 10, boxY - 18, boxWidth - 20, 34, 6, 6, "F");
-  doc.setDrawColor(210); // Match the border color
-  doc.setLineWidth(0.3);
-  doc.roundedRect(boxX + 10, boxY - 18, boxWidth - 20, 34, 6, 6);
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(16);
-  drawTextSmart(
-    doc,
-    `סה״כ לתשלום: ${formatMoneyPdf(grand)}`,
-    boxX + boxWidth - 18,
-    boxY + 2,
-    { align: "right" }
-  );
-  doc.setFont(pdfFontName, "bold");
-
-  // ===== Footer: anchored to bottom of last page =====
-  const footerHeight = 80;
-  const footerTop = pageHeight - marginBottom - footerHeight;
-  let footerY = footerTop;
-
-  // Notes come BEFORE date
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(13);
-  if (notes?.trim()) {
-    const notesLabel = "הערות:";
-    drawTextSmart(doc, notesLabel, pageWidth - marginX, footerY, {
-      align: "right",
-    });
-    footerY += 20;
-
-    doc.setFont(pdfFontName, "bold");
-    doc.setFontSize(12);
-    const notesWidth = pageWidth - marginX * 2;
-    // Preserve user line breaks: split by \n then wrap each paragraph
-    const paragraphs = notes.trim().split(/\r?\n/);
-    const lineHeight = 15;
-    for (const para of paragraphs) {
-      const wrapped = doc.splitTextToSize(para.trim(), notesWidth);
-      wrapped.forEach((line: string, idx: number) => {
-        drawTextSmart(doc, line, pageWidth - marginX, footerY + idx * lineHeight, {
-          align: "right",
-        });
-      });
-      footerY += wrapped.length * lineHeight;
-    }
-    footerY += 8;
-  }
-
-  // Date comes after notes
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(13);
-  drawTextSmart(
-    doc,
-    `תאריך: ${dateFmt.format(new Date())}`,
-    pageWidth - marginX,
-    footerY,
-    { align: "right" }
-  );
-  footerY += 20;
-
-  // Signature label
-  footerY += 10;
-  doc.setFont(pdfFontName, "bold");
-  doc.setFontSize(13);
-  drawTextSmart(doc, "חתימה:", pageWidth - marginX, footerY, {
-    align: "right",
-  });
-
-  // Signature image – placed BELOW the text, with extra spacing
-  try {
-    const sigResp = await fetch("/fonts/signature.png");
-    if (sigResp.ok) {
-      const blob = await sigResp.blob();
-      const dataUrl = await blobToDataUrl(blob);
-
-      const sigWidth = 120;
-      const sigHeight = 40;
-      const sigX = pageWidth - marginX - sigWidth; // right aligned
-      const sigY = footerY + 8; // a bit under the "חתימה:" text
-
-      doc.addImage(dataUrl, "PNG", sigX, sigY, sigWidth, sigHeight);
-    }
-  } catch {
-    // ignore if missing
+  } catch (e: any) {
+    console.error("PDF generation failed (pdf-lib):", e);
+    return {
+      success: false,
+      error: `שגיאה ביצוא PDF: ${e?.message || String(e)}`,
+    };
   }
 
   // ===== Filename: "<CustomerName> YYYY-MM-DD.pdf" =====
@@ -813,10 +541,8 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
       
       console.log("Got save path successfully:", savePath);
       
-      // Generate PDF as array buffer for saving
-      console.log("Generating PDF array buffer...");
-      const pdfArrayBuffer = doc.output("arraybuffer");
-      console.log("PDF array buffer generated, size:", pdfArrayBuffer.byteLength, "bytes");
+      // PDF already generated with pdf-lib (Unicode/Hebrew support)
+      console.log("PDF array buffer ready, size:", pdfArrayBuffer.byteLength, "bytes");
       
       // Get the folder path (year folder) to open in Windows Explorer
       // Extract directory from the full file path
@@ -1031,8 +757,14 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
   } else {
     // In browser: open in new window and download
     console.log("Browser environment, using standard download...");
-    doc.output("dataurlnewwindow");
-    doc.save(filename);
+    const blob = new Blob([pdfArrayBuffer], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
     return { success: true, savedPath: "" };
   }
 }

@@ -76,11 +76,20 @@ export type AppCurrentState = {
 /** Dimension unit for width/height (stored internally in cm) */
 export type DimensionUnit = "cm" | "mm";
 
+/** Preset text options for "הערות למסמך" – user can select one when starting a new quote */
+export type NotesPreset = {
+  id: string;
+  label: string;  // short label for the dropdown
+  text: string;   // full text applied to notes
+};
+
 export type AppState = {
   customers: Customer[];
   quotes: Quote[];
   profiles: Profile[];
   addons: Addon[]; // Global addons that can be managed in settings
+  /** Default הערות presets – manageable in main Settings, selectable when editing notes */
+  notesPresets: NotesPreset[];
   current: AppCurrentState;
   ui: AppUIState;
   pdfSaveFolder?: string; // Custom folder path for PDF exports (optional, defaults to Desktop)

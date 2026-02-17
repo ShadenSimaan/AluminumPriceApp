@@ -1,11 +1,7 @@
-REQUIRED for Hebrew text in PDF export:
+PDF export uses pdf-lib with Noto Sans Hebrew loaded from CDN – no local fonts required.
 
-  NotoSansHebrew-Regular.ttf   (required – without it, Hebrew will show as garbled characters)
-  NotoSansHebrew-Bold.ttf     (optional)
+Optional (only if you want signature in PDF):
+  signature.png   – place in public/fonts/ for a signature image in the PDF footer
 
-Download:
-  1. Go to https://fonts.google.com/noto/specimen/Noto+Sans+Hebrew
-  2. Click "Download family"
-  3. Unzip and copy the .ttf files (e.g. from the "static" folder) into this folder: public/fonts/
-
-The app looks for these files when exporting PDF. If they are missing, the PDF will use a default font and Hebrew will not display correctly.
+Local fonts (NotoSansHebrew-Regular.ttf, NotoSansHebrew-Bold.ttf) are no longer required;
+the app fetches the Hebrew font from jsDelivr CDN automatically.
