@@ -4,6 +4,7 @@
  * Implements RTL (Right-to-Left) reversal so Hebrew displays correctly.
  */
 import type { PdfQuotePayload, PdfLineItem, PdfFreeFormAddition } from "./pdfExporter";
+import { documentTypeLabel, normalizeDocumentType } from "./types";
 import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 
@@ -13,8 +14,10 @@ const MARGIN_X = 40;
 const MARGIN_TOP = 40;
 const MARGIN_BOTTOM = 40;
 
-// Hebrew-only subset (works correctly). Use Helvetica for numbers – full TTF causes "ל" for all chars.
+// Prefer TTF for PDF embedding – WOFF/WOFF2 often render as dots on iOS/Android PDF viewers.
+// Fallback to WOFF2/WOFF if TTF fails (e.g. CORS or network).
 const HEBREW_FONT_URLS = [
+  "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanshebrew/NotoSansHebrew%5Bwdth%2Cwght%5D.ttf",
   "https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-hebrew@5.2.8/files/noto-sans-hebrew-hebrew-400-normal.woff2",
   "https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-hebrew@5.2.8/files/noto-sans-hebrew-hebrew-400-normal.woff",
 ];
@@ -74,7 +77,41 @@ function segmentForFonts(text: string): { text: string; useHebrew: boolean }[] {
       segments.push(seg);
     }
   }
-  return segments;
+  return mergeHebrewSentencePunctuation(segments);
+}
+
+/** ASCII / common sentence punctuation that must stay on the preceding Hebrew word for RTL draw order. */
+const HEBREW_SENTENCE_PUNCT = /^[.,;:!?…\u2026]+$/u;
+
+/**
+ * pdf-lib draws segments in reverse visual order; isolated `.,` segments end up on the wrong side of words.
+ * Merge them (and drop stray spaces before them) onto the previous Hebrew segment.
+ */
+function mergeHebrewSentencePunctuation(
+  segments: { text: string; useHebrew: boolean }[]
+): { text: string; useHebrew: boolean }[] {
+  const out: { text: string; useHebrew: boolean }[] = [];
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
+    // Drop whitespace between Hebrew and following punctuation so "נעימה ." still attaches correctly
+    if (!seg.useHebrew && /^\s+$/.test(seg.text) && i + 1 < segments.length) {
+      const next = segments[i + 1];
+      if (!next.useHebrew && HEBREW_SENTENCE_PUNCT.test(next.text) && out.length > 0 && out[out.length - 1].useHebrew) {
+        i += 1;
+        continue;
+      }
+    }
+    if (!seg.useHebrew && HEBREW_SENTENCE_PUNCT.test(seg.text) && out.length > 0 && out[out.length - 1].useHebrew) {
+      const last = out[out.length - 1];
+      out[out.length - 1] = { text: last.text + seg.text, useHebrew: true };
+      i += 1;
+      continue;
+    }
+    out.push({ ...seg });
+    i += 1;
+  }
+  return out;
 }
 
 function parseNum(value: string | number | null | undefined): number {
@@ -100,8 +137,30 @@ function normalizeTax(raw: number): number {
   return raw;
 }
 
-/** Load Hebrew font bytes; tries WOFF2, WOFF, then TTF from CDN. */
+/** Local TTF paths (same-origin). Prefer static Regular from zip (static/NotoSansHebrew-Regular.ttf). */
+const LOCAL_HEBREW_FONT_PATHS = [
+  "/fonts/NotoSansHebrew-Regular.ttf",
+  "fonts/NotoSansHebrew-Regular.ttf",
+  "./fonts/NotoSansHebrew-Regular.ttf",
+  "/fonts/NotoSansHebrew-VariableFont_wdth,wght.ttf",
+  "fonts/NotoSansHebrew-VariableFont_wdth,wght.ttf",
+];
+
+/** Load Hebrew font bytes: local TTF first, then CDN TTF, then WOFF2/WOFF. */
 async function loadHebrewFontBytes(): Promise<ArrayBuffer> {
+  // Prefer local TTF so PDFs render correctly on iOS/Android without CORS or WOFF issues.
+  if (typeof document !== "undefined" && document.baseURI) {
+    try {
+      const base = new URL(document.baseURI);
+      for (const path of LOCAL_HEBREW_FONT_PATHS) {
+        const url = path.startsWith("/") ? new URL(path, base.origin) : new URL(path, base);
+        const resp = await fetch(url.href);
+        if (resp.ok) return await resp.arrayBuffer();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
   let lastError: Error | null = null;
   for (const url of HEBREW_FONT_URLS) {
     try {
@@ -154,9 +213,11 @@ function drawTextCenter(
   size: number,
   text: string,
   xCenter: number,
-  y: number
+  y: number,
+  opts: { reverseWords?: boolean } = {}
 ): void {
-  const rtlText = reverseWordOrder(text);
+  const reverseWords = opts.reverseWords !== false;
+  const rtlText = reverseWords ? reverseWordOrder(text) : text;
   const segments = segmentForFonts(rtlText);
   let totalW = 0;
   for (const { text: seg, useHebrew } of segments) {
@@ -173,21 +234,109 @@ function drawTextCenter(
   }
 }
 
-/** Wrap text to fit width */
+/** Break a single oversized token into chunks that each fit maxWidth. */
+function breakLongWord(
+  hebrewFont: PDFFont,
+  latinFont: PDFFont,
+  size: number,
+  word: string,
+  maxWidth: number
+): string[] {
+  if (!word) return [];
+  if (textWidth(hebrewFont, latinFont, size, word) <= maxWidth) return [word];
+  const chunks: string[] = [];
+  let chunk = "";
+  for (const ch of word) {
+    const candidate = chunk + ch;
+    if (chunk && textWidth(hebrewFont, latinFont, size, candidate) > maxWidth) {
+      chunks.push(chunk);
+      chunk = ch;
+    } else {
+      chunk = candidate;
+    }
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
+}
+
+/** Wrap text to fit width (words first; overlong tokens are split by character). */
 function wrapText(hebrewFont: PDFFont, latinFont: PDFFont, size: number, text: string, maxWidth: number): string[] {
-  const words = text.split(/\s+/);
+  if (!text) return [];
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
   const lines: string[] = [];
   let line = "";
+  const pushLine = () => {
+    if (line) {
+      lines.push(line);
+      line = "";
+    }
+  };
   for (const word of words) {
     const candidate = line ? `${line} ${word}` : word;
     if (textWidth(hebrewFont, latinFont, size, candidate) <= maxWidth) {
       line = candidate;
-    } else {
-      if (line) lines.push(line);
+      continue;
+    }
+    pushLine();
+    if (textWidth(hebrewFont, latinFont, size, word) <= maxWidth) {
       line = word;
+      continue;
+    }
+    const pieces = breakLongWord(hebrewFont, latinFont, size, word, maxWidth);
+    for (const piece of pieces) {
+      if (textWidth(hebrewFont, latinFont, size, piece) <= maxWidth) {
+        lines.push(piece);
+      } else {
+        lines.push(piece); // last resort: still emit so nothing is dropped
+      }
     }
   }
-  if (line) lines.push(line);
+  pushLine();
+  return lines.length > 0 ? lines : [""];
+}
+
+/** Word-wrap where each output line may use a different max width (by line index). */
+function wrapTextVariableWidth(
+  hebrewFont: PDFFont,
+  latinFont: PDFFont,
+  size: number,
+  text: string,
+  maxWidthForLine: (lineIndex: number) => number
+): string[] {
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  const lines: string[] = [];
+  let line = "";
+  let lineIndex = 0;
+  const flush = (): void => {
+    if (line) {
+      lines.push(line);
+      line = "";
+      lineIndex += 1;
+    }
+  };
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    const mw = maxWidthForLine(lineIndex);
+    if (textWidth(hebrewFont, latinFont, size, candidate) <= mw) {
+      line = candidate;
+    } else {
+      if (line) {
+        flush();
+        const mw2 = maxWidthForLine(lineIndex);
+        const lone = word;
+        if (textWidth(hebrewFont, latinFont, size, lone) <= mw2) {
+          line = lone;
+        } else {
+          lines.push(lone);
+          lineIndex += 1;
+        }
+      } else {
+        lines.push(word);
+        lineIndex += 1;
+      }
+    }
+  }
+  flush();
   return lines;
 }
 
@@ -195,7 +344,8 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
   const fontBytes = await loadHebrewFontBytes();
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
-  const hebrewFont = await doc.embedFont(fontBytes);
+  // subset: false embeds the full font so mobile viewers (iOS/Android) render text correctly.
+  const hebrewFont = await doc.embedFont(fontBytes, { subset: false });
   const latinFont = doc.embedStandardFont(StandardFonts.Helvetica);
   const page = doc.addPage([A4_WIDTH, A4_HEIGHT]);
   const right = A4_WIDTH - MARGIN_X;
@@ -211,7 +361,12 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     y -= 12;
   };
 
-  // Header
+  // Document title (both types) goes below מס מ.ע in the company header
+  const documentType = normalizeDocumentType(payload.documentType);
+  const docTitle =
+    (payload.title && payload.title.trim()) || documentTypeLabel(documentType);
+
+  // Company header
   const headerLines = [
     "אלום סמעאן סאמי",
     "ביצוע עבודות אלומיניום ותריס",
@@ -222,6 +377,19 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     drawTextCenter(page, hebrewFont, latinFont, 18, line, A4_WIDTH / 2, y);
     y -= 22;
   });
+
+  y -= 6;
+  drawTextCenter(page, hebrewFont, latinFont, 22, docTitle, A4_WIDTH / 2, y);
+  y -= 22;
+  if (
+    documentType === "payment_request" &&
+    payload.documentNumber != null &&
+    payload.documentNumber > 0
+  ) {
+    const numText = `מס׳ ${String(Math.floor(payload.documentNumber)).padStart(4, "0")}`;
+    drawTextCenter(page, hebrewFont, latinFont, 14, numText, A4_WIDTH / 2, y);
+    y -= 16;
+  }
   y -= 12;
 
   // Customer with underline under name only
@@ -263,10 +431,10 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
   // Items table
   const colW = {
     num: 25,
-    profile: 80,
-    dims: 65,
-    location: 60,
-    details: 120,
+    profile: 78,
+    dims: 78,
+    location: 58,
+    details: 111,
     unitPrice: 65,
     qty: 30,
     total: 70,
@@ -282,7 +450,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     total: right - colW.num - colW.profile - colW.dims - colW.location - colW.details - colW.unitPrice - colW.qty,
   };
   const lineH = 14;
-  const headerH = 32;
+  const headerH = 40;
 
   const colBoundaries = [
     MARGIN_X,
@@ -328,18 +496,31 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     });
     drawVerticalGridLines(currentPage, y - headerH, y);
     const cy = y - headerH / 2 + 5;
+    const dimsX = colRight.dims - colW.dims / 2;
     const headers = [
-      { text: "מס׳", x: colRight.num - 4 },
-      { text: "פרופיל", x: colRight.profile - 4 },
-      { text: payload.dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)", x: colRight.dims - 4 },
-      { text: "מיקום", x: colRight.location - 4 },
-      { text: "פרטים", x: colRight.details - 4 },
-      { text: "מחיר ליח׳", x: colRight.unitPrice - 4 },
-      { text: "כמות", x: colRight.qty - 4 },
-      { text: "סה״כ", x: colRight.total - 4 },
+      { text: "מס׳", xCenter: colRight.num - colW.num / 2 },
+      { text: "פרופיל", xCenter: colRight.profile - colW.profile / 2 },
+      { text: "מיקום", xCenter: colRight.location - colW.location / 2 },
+      { text: "פרטים", xCenter: colRight.details - colW.details / 2 },
+      { text: "מחיר ליח׳", xCenter: colRight.unitPrice - colW.unitPrice / 2 },
+      { text: "כמות", xCenter: colRight.qty - colW.qty / 2 },
+      { text: "סה״כ", xCenter: colRight.total - colW.total / 2 },
     ];
-    headers.forEach(({ text, x }) => {
-      drawTextRight(currentPage, hebrewFont, latinFont, 12, text, x, cy);
+    headers.forEach(({ text, xCenter }) => {
+      drawTextCenter(currentPage, hebrewFont, latinFont, 12, text, xCenter, cy);
+    });
+    // מידות: title + order hint (width × height) matching the values below
+    drawTextCenter(
+      currentPage,
+      hebrewFont,
+      latinFont,
+      11,
+      payload.dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)",
+      dimsX,
+      y - 14
+    );
+    drawTextCenter(currentPage, hebrewFont, latinFont, 8, "רוחב × גובה", dimsX, y - 28, {
+      reverseWords: false,
     });
     y -= headerH;
   };
@@ -349,6 +530,8 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
   const items = payload.items || [];
   const additions = payload.freeFormAdditions || [];
   const dimUnit = payload.dimensionUnit ?? "cm";
+  const taxRate = normalizeTax(parseNum(payload.taxPercentText));
+  const showTotalsBox = payload.showTotals !== false;
 
   items.forEach((it: PdfLineItem, idx: number) => {
     const w = parseNum(it.widthCm);
@@ -361,14 +544,32 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const manual = (it.manualUnitPrice ?? "").trim();
     const perItem = manual ? parseNum(manual) + addonsSum : area * parseNum(it.unitPrice) + addonsSum;
     const lineTotal = perItem * qty;
+    const lineTotalWithVat = lineTotal * (1 + taxRate);
     const profileStr = it.profileName || "";
     const detailsStr = [it.details, (it.addons || []).filter((a) => a.checked).map((a) => `${a.name}`).join(" • ")]
       .filter(Boolean)
       .join(" — ");
+
+    const profileLines = wrapText(hebrewFont, latinFont, 12, profileStr, colW.profile - 8);
+    const locationLines = wrapText(hebrewFont, latinFont, 12, it.location || "", colW.location - 8);
+    const detailsLines = wrapText(hebrewFont, latinFont, 12, detailsStr, colW.details - 8);
+    const unitPriceLines = wrapText(hebrewFont, latinFont, 12, formatNum(perItem), colW.unitPrice - 8);
+    const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);
+    const baseTotalText = `${formatNum(lineTotal)} ₪`;
+    const vatTotalText = `עם מע״מ ${formatNum(lineTotalWithVat)} ₪`;
+    const baseTotalLines = wrapText(hebrewFont, latinFont, 12, baseTotalText, colW.total - 8);
+    const vatTotalLines = !showTotalsBox
+      ? wrapText(hebrewFont, latinFont, 12, vatTotalText, colW.total - 8)
+      : [];
+    const totalLinesWrapped: string[] = [...baseTotalLines, ...vatTotalLines];
     const rowLines = Math.max(
       1,
-      wrapText(hebrewFont, latinFont, 12, profileStr, colW.profile - 8).length,
-      wrapText(hebrewFont, latinFont, 12, detailsStr, colW.details - 8).length
+      profileLines.length,
+      locationLines.length,
+      detailsLines.length,
+      unitPriceLines.length,
+      qtyLines.length,
+      totalLinesWrapped.length
     );
     const rowH = rowLines * lineH + 6;
     checkNewPage(rowH);
@@ -381,26 +582,54 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       borderWidth: 0.5,
     });
     drawVerticalGridLines(currentPage, y - rowH, y);
-    let by = y - 2 - lineH;
-    const drawT = (t: string, xR: number, yy: number) => {
-      drawTextRight(currentPage, hebrewFont, latinFont, 12, t, xR - 4, yy);
+    const rowBaseline = y - 2 - lineH;
+    const drawT = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) => {
+      const rtlText = reverseWordOrder(t);
+      const segments = segmentForFonts(rtlText);
+      let x = xR - 4;
+      for (let i = segments.length - 1; i >= 0; i--) {
+        const { text: seg, useHebrew } = segments[i];
+        const font = useHebrew ? hebrewFont : latinFont;
+        const w = font.widthOfTextAtSize(seg, 12);
+        x -= w;
+        currentPage.drawText(seg, { x, y: yy, size: 12, font, color });
+      }
     };
-    drawT(String(idx + 1), colRight.num, by);
-    wrapText(hebrewFont, latinFont, 12, profileStr, colW.profile - 8).forEach((line) => {
-      drawT(line, colRight.profile, by);
-      by -= lineH;
+    const drawColLines = (lines: string[], xR: number) => {
+      let yy = rowBaseline;
+      for (const line of lines) {
+        if (line) drawT(line, xR, yy);
+        yy -= lineH;
+      }
+    };
+    drawT(String(idx + 1), colRight.num, rowBaseline);
+    drawColLines(profileLines, colRight.profile);
+    // מידות stays on one line so the full WxH number is readable at a glance
+    drawT(dims, colRight.dims, rowBaseline);
+    drawColLines(locationLines, colRight.location);
+    drawColLines(detailsLines, colRight.details);
+    drawColLines(unitPriceLines, colRight.unitPrice);
+    drawColLines(qtyLines, colRight.qty);
+    // Total column: base total and, when overall box is hidden, extra wrapped line(s) "עם מע״מ ..." with background highlight
+    let totalY = rowBaseline;
+    totalLinesWrapped.forEach((line, lineIdx) => {
+      const isVatLine = lineIdx >= baseTotalLines.length;
+      if (isVatLine) {
+        // Light background marker behind the "עם מע״מ" line only (single-line height, aligned to this line’s baseline)
+        const rectX = colRight.total - colW.total;
+        const rectHeight = 12; // one line of 12pt text
+        const rectY = totalY;   // baseline of this line – rect sits behind this line only
+        currentPage.drawRectangle({
+          x: rectX,
+          y: rectY,
+          width: colW.total,
+          height: rectHeight,
+          color: rgb(0.9, 0.96, 1),
+        });
+      }
+      drawT(line, colRight.total, totalY, rgb(0, 0, 0));
+      totalY -= lineH;
     });
-    by = y - 2 - lineH;
-    drawT(dims, colRight.dims, by);
-    if (it.location) drawT(it.location, colRight.location, by);
-    wrapText(hebrewFont, latinFont, 12, detailsStr, colW.details - 8).forEach((line) => {
-      drawT(line, colRight.details, by);
-      by -= lineH;
-    });
-    by = y - 2 - lineH;
-    drawT(formatNum(perItem), colRight.unitPrice, by);
-    drawT(formatNum(qty), colRight.qty, by);
-    drawT(formatNum(lineTotal) + " ₪", colRight.total, by);
     y -= rowH;
   });
 
@@ -408,7 +637,25 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const price = parseNum(add.price);
     const qty = Math.max(0, parseNum(add.qty));
     const total = price * qty;
-    const rowH = lineH + 6;
+    const totalWithVat = total * (1 + taxRate);
+    const baseTotalText = `${formatNum(total)} ₪`;
+    const vatTotalText = `עם מע״מ ${formatNum(totalWithVat)} ₪`;
+    const nameLines = wrapText(hebrewFont, latinFont, 12, add.name || "", colW.details - 8);
+    const unitPriceLines = wrapText(hebrewFont, latinFont, 12, formatNum(price), colW.unitPrice - 8);
+    const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);
+    const baseTotalLines = wrapText(hebrewFont, latinFont, 12, baseTotalText, colW.total - 8);
+    const vatTotalLines = !showTotalsBox
+      ? wrapText(hebrewFont, latinFont, 12, vatTotalText, colW.total - 8)
+      : [];
+    const totalLinesWrapped: string[] = [...baseTotalLines, ...vatTotalLines];
+    const rowLines = Math.max(
+      1,
+      nameLines.length,
+      unitPriceLines.length,
+      qtyLines.length,
+      totalLinesWrapped.length
+    );
+    const rowH = rowLines * lineH + 6;
     checkNewPage(rowH);
     currentPage.drawRectangle({
       x: MARGIN_X,
@@ -419,97 +666,222 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       borderWidth: 0.5,
     });
     drawVerticalGridLines(currentPage, y - rowH, y);
-    const by = y - 2 - lineH;
-    const drawAdd = (t: string, xR: number) => {
-      drawTextRight(currentPage, hebrewFont, latinFont, 12, t, xR - 4, by);
+    const rowBaseline = y - 2 - lineH;
+    const drawAdd = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) => {
+      const rtlText = reverseWordOrder(t);
+      const segments = segmentForFonts(rtlText);
+      let x = xR - 4;
+      for (let i = segments.length - 1; i >= 0; i--) {
+        const { text: seg, useHebrew } = segments[i];
+        const font = useHebrew ? hebrewFont : latinFont;
+        const w = font.widthOfTextAtSize(seg, 12);
+        x -= w;
+        currentPage.drawText(seg, { x, y: yy, size: 12, font, color });
+      }
     };
-    drawAdd(String(items.length + addIdx + 1), colRight.num);
-    if (add.name) drawAdd(add.name, colRight.details);
-    drawAdd(formatNum(price), colRight.unitPrice);
-    drawAdd(formatNum(qty), colRight.qty);
-    drawAdd(formatNum(total) + " ₪", colRight.total);
+    const drawColLines = (lines: string[], xR: number) => {
+      let yy = rowBaseline;
+      for (const line of lines) {
+        if (line) drawAdd(line, xR, yy);
+        yy -= lineH;
+      }
+    };
+    drawAdd(String(items.length + addIdx + 1), colRight.num, rowBaseline);
+    drawColLines(nameLines, colRight.details);
+    drawColLines(unitPriceLines, colRight.unitPrice);
+    drawColLines(qtyLines, colRight.qty);
+    // Total column for free-form additions (possibly multi-line, wrapped, with background highlight for "עם מע״מ")
+    let totalY = rowBaseline;
+    totalLinesWrapped.forEach((line, lineIdx) => {
+      const isVatLine = lineIdx >= baseTotalLines.length;
+      if (isVatLine) {
+        const rectX = colRight.total - colW.total;
+        const rectHeight = 12;
+        const rectY = totalY;
+        currentPage.drawRectangle({
+          x: rectX,
+          y: rectY,
+          width: colW.total,
+          height: rectHeight,
+          color: rgb(0.9, 0.96, 1),
+        });
+      }
+      drawAdd(line, colRight.total, totalY, rgb(0, 0, 0));
+      totalY -= lineH;
+    });
     y -= rowH;
   });
 
   y -= 18;
 
-  // Reserve space for footer (signature + date + notes) at bottom of page
-  const FOOTER_HEIGHT = 130;
-  if (y - 96 - FOOTER_HEIGHT < MARGIN_BOTTOM) {
+  // Totals box and footer (חתימה, תאריך, הערות) sit side by side in one bottom band – they do not
+  // affect each other; we only add a new page when the table would run into this band.
+  // Use a low band position to extend usable area further down the page.
+  const footerBaseY = 20;
+  const TOTALS_BOX_HEIGHT = 96;
+  const FOOTER_ZONE_HEIGHT = 130;
+  const BOTTOM_BAND_HEIGHT = Math.max(TOTALS_BOX_HEIGHT, FOOTER_ZONE_HEIGHT); // 130
+
+  // Only add a new page when table content would extend into the bottom band (footer zone).
+  if (y < footerBaseY + BOTTOM_BAND_HEIGHT) {
     currentPage = doc.addPage([A4_WIDTH, A4_HEIGHT]);
     y = A4_HEIGHT - MARGIN_TOP;
   }
 
-  // Totals
-  const sub = items.reduce((sum, it) => {
-    const w = parseNum(it.widthCm);
-    const h = parseNum(it.heightCm);
-    const qty = Math.max(0, parseNum(it.qty));
-    const area = (w * h) / 10000;
-    const addonsSum = (it.addons || []).reduce((s, a) => s + (a.checked ? parseNum(a.price) : 0), 0);
-    const manual = (it.manualUnitPrice ?? "").trim();
-    const perItem = manual ? parseNum(manual) + addonsSum : area * parseNum(it.unitPrice) + addonsSum;
-    return sum + perItem * qty;
-  }, 0);
-  const freeSub = additions.reduce((sum, add) => sum + parseNum(add.price) * Math.max(0, parseNum(add.qty)), 0);
-  const totalSub = sub + freeSub;
-  const vat = totalSub * normalizeTax(parseNum(payload.taxPercentText));
-  const grand = totalSub + vat;
-
   const boxW = 260;
   const boxX = MARGIN_X;
-  let boxY = y - 96;
-  currentPage.drawRectangle({
-    x: boxX,
-    y: boxY,
-    width: boxW,
-    height: 96,
-    borderColor: rgb(0.82, 0.82, 0.82),
-    borderWidth: 0.3,
-  });
-  boxY += 70;
-  drawTextRight(currentPage, hebrewFont, latinFont, 13, `מחיר: ${formatMoney(totalSub)}`, boxX + boxW - 12, boxY);
-  boxY -= 26;
-  drawTextRight(currentPage, hebrewFont, latinFont, 13, `מע״מ: ${formatMoney(vat)}`, boxX + boxW - 12, boxY);
-  boxY -= 28;
-  currentPage.drawRectangle({
-    x: boxX + 10,
-    y: boxY - 16,
-    width: boxW - 20,
-    height: 34,
-    color: rgb(0.925, 0.973, 1),
-    borderColor: rgb(0.82, 0.82, 0.82),
-    borderWidth: 0.3,
-  });
-  drawTextRight(currentPage, hebrewFont, latinFont, 16, `סה״כ :לתשלום ${formatMoney(grand)}`, boxX + boxW - 18, boxY + 2);
+  let totalsBoxBottomY: number | null = null;
 
-  // Footer – fixed at bottom of last page (y=0 is bottom in pdf-lib)
-  const footerBaseY = MARGIN_BOTTOM + 10;
-  let footerY = footerBaseY;
+  // Totals box: right after the table (or at top of new page if we just added one).
+  if (showTotalsBox) {
+    const sub = items.reduce((sum, it) => {
+      const w = parseNum(it.widthCm);
+      const h = parseNum(it.heightCm);
+      const qty = Math.max(0, parseNum(it.qty));
+      const area = (w * h) / 10000;
+      const addonsSum = (it.addons || []).reduce((s, a) => s + (a.checked ? parseNum(a.price) : 0), 0);
+      const manual = (it.manualUnitPrice ?? "").trim();
+      const perItem = manual ? parseNum(manual) + addonsSum : area * parseNum(it.unitPrice) + addonsSum;
+      return sum + perItem * qty;
+    }, 0);
+    const freeSub = additions.reduce((sum, add) => sum + parseNum(add.price) * Math.max(0, parseNum(add.qty)), 0);
+    const totalSub = sub + freeSub;
+    const vat = totalSub * taxRate;
+    const grand = totalSub + vat;
 
-  // Footer order (bottom to top): notes content, הערות:, date, signature, חתימה:
-  // PDF y increases upward, so draw lower items first, then labels above their data
-
-  // Notes section: notes content first (bottom), then "הערות:" above it
-  if (payload.notes?.trim()) {
-    payload.notes
-      .trim()
-      .split(/\r?\n/)
-      .forEach((para) => {
-        wrapText(hebrewFont, latinFont, 12, para.trim(), A4_WIDTH - MARGIN_X * 2).forEach((line) => {
-          drawTextRight(currentPage, hebrewFont, latinFont, 12, line, right, footerY);
-          footerY += 15;
-        });
-      });
-    drawTextRight(currentPage, hebrewFont, latinFont, 13, "הערות:", right, footerY + 18);
-    footerY += 46;
+    const boxY = y - TOTALS_BOX_HEIGHT; // immediately below the table
+    totalsBoxBottomY = boxY;
+    currentPage.drawRectangle({
+      x: boxX,
+      y: boxY,
+      width: boxW,
+      height: TOTALS_BOX_HEIGHT,
+      borderColor: rgb(0.82, 0.82, 0.82),
+      borderWidth: 0.3,
+    });
+    let textY = boxY + 70;
+    drawTextRight(currentPage, hebrewFont, latinFont, 13, `מחיר: ${formatMoney(totalSub)}`, boxX + boxW - 12, textY);
+    textY -= 26;
+    drawTextRight(currentPage, hebrewFont, latinFont, 13, `מע״מ: ${formatMoney(vat)}`, boxX + boxW - 12, textY);
+    textY -= 28;
+    currentPage.drawRectangle({
+      x: boxX + 10,
+      y: textY - 16,
+      width: boxW - 20,
+      height: 34,
+      color: rgb(0.925, 0.973, 1),
+      borderColor: rgb(0.82, 0.82, 0.82),
+      borderWidth: 0.3,
+    });
+    drawTextRight(currentPage, hebrewFont, latinFont, 16, `סה״כ :לתשלום ${formatMoney(grand)}`, boxX + boxW - 18, textY + 2);
   }
 
-  // Date
-  drawTextRight(currentPage, hebrewFont, latinFont, 13, `תאריך: ${dateFmt.format(new Date())}`, right, footerY);
+  // Footer (חתימה, תאריך, הערות) – fixed position on the right of the same bottom band.
+  const GAP_BETWEEN_BOX_AND_FOOTER = 24;
+  const FULL_NOTES_WIDTH = right - MARGIN_X;
+  const NARROW_NOTES_WIDTH = right - (boxX + boxW + GAP_BETWEEN_BOX_AND_FOOTER);
+  const NOTES_LINE_STEP = 15;
+  const GAP_LABEL_ABOVE_FIRST_LINE = 20;
+
+  const noteParagraphs = payload.notes?.trim()
+    ? payload.notes
+        .trim()
+        .split(/\r?\n/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+    : [];
+
+  /** Baseline y for global line index g when there are `total` wrapped lines (stacked bottom → top). */
+  const noteLineBaseline = (g: number, total: number): number =>
+    footerBaseY + (total - 1 - g) * NOTES_LINE_STEP;
+
+  const lineOverlapsTotalsBox = (baselineY: number): boolean => {
+    if (!showTotalsBox || totalsBoxBottomY == null) return false;
+    const boxLow = totalsBoxBottomY;
+    const boxHigh = totalsBoxBottomY + TOTALS_BOX_HEIGHT;
+    const textLow = baselineY - 3;
+    const textHigh = baselineY + 14;
+    return !(textHigh < boxLow || textLow > boxHigh);
+  };
+
+  const maxWidthForGlobalLineIndex = (g: number, estimatedTotal: number): number => {
+    const b = noteLineBaseline(g, estimatedTotal);
+    return lineOverlapsTotalsBox(b) ? NARROW_NOTES_WIDTH : FULL_NOTES_WIDTH;
+  };
+
+  const buildWrappedNoteLines = (estimatedTotal: number): string[] => {
+    const out: string[] = [];
+    let globalIdx = 0;
+    for (const para of noteParagraphs) {
+      const paraLines = wrapTextVariableWidth(hebrewFont, latinFont, 12, para, (li) =>
+        maxWidthForGlobalLineIndex(globalIdx + li, estimatedTotal)
+      );
+      for (const pl of paraLines) {
+        out.push(pl);
+        globalIdx += 1;
+      }
+    }
+    return out;
+  };
+
+  const computeFinalNoteLines = (): string[] => {
+    if (noteParagraphs.length === 0) return [];
+    let est = 0;
+    for (const para of noteParagraphs) {
+      est += wrapText(hebrewFont, latinFont, 12, para, FULL_NOTES_WIDTH).length;
+    }
+    let lines = buildWrappedNoteLines(est);
+    for (let iter = 0; iter < 12; iter++) {
+      if (lines.length === est) break;
+      est = lines.length;
+      lines = buildWrappedNoteLines(est);
+    }
+    return lines;
+  };
+
+  const wrappedNoteLines = noteParagraphs.length > 0 ? computeFinalNoteLines() : [];
+
+  // Measure the footer height (notes + date + signature). Only add a new page when the footer would
+  // overflow into the table/calculations above.
+  const estimateFooterHeight = (): number => {
+    let h = 0;
+    if (wrappedNoteLines.length > 0) {
+      h += wrappedNoteLines.length * NOTES_LINE_STEP + 46; // notes + "הערות:" + gap before date (same as before)
+    }
+    h += 22; // date block vertical advance
+    h += 48; // distance from signature image baseline to "חתימה:" label
+    return h;
+  };
+
+  const availableHeightForFooter = y - footerBaseY;
+  if (estimateFooterHeight() > availableHeightForFooter) {
+    currentPage = doc.addPage([A4_WIDTH, A4_HEIGHT]);
+  }
+
+  let footerY = footerBaseY;
+
+  // Footer order (top → bottom on page): date, "הערות:", note lines (first line directly under label),
+  // then signature. PDF y increases upward; we assign baselines so the first note line is under the label
+  // and the last wrapped line sits at the lowest y (previous bug drew lines in reverse order).
+
+  if (wrappedNoteLines.length > 0) {
+    const noteLines = wrappedNoteLines;
+    const n = noteLines.length;
+    const firstLineY = footerBaseY + (n > 0 ? (n - 1) * NOTES_LINE_STEP : 0);
+    for (let i = 0; i < n; i++) {
+      drawTextRight(currentPage, hebrewFont, latinFont, 12, noteLines[i], right, firstLineY - i * NOTES_LINE_STEP);
+    }
+    const labelY = firstLineY + GAP_LABEL_ABOVE_FIRST_LINE;
+    drawTextRight(currentPage, hebrewFont, latinFont, 13, "הערות:", right, labelY);
+    footerY = labelY + 46;
+  }
+
+  // Date – fixed position. Reuse the quote's saved date unless the quote actually changed.
+  const pdfDate = payload.pdfDateMs ? new Date(payload.pdfDateMs) : new Date();
+  drawTextRight(currentPage, hebrewFont, latinFont, 13, `תאריך: ${dateFmt.format(pdfDate)}`, right, footerY);
   footerY += 22;
 
-  // Signature section: signature first (bottom), then "חתימה:" above it
+  // Signature section: signature first (bottom), then "חתימה:" above it – fixed position
   const sigUrls = ["/fonts/signature.png", "fonts/signature.png", "./fonts/signature.png"];
   if (typeof document !== "undefined" && document.baseURI) {
     try {

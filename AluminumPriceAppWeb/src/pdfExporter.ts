@@ -1,6 +1,9 @@
 // FILE: src/pdfExporter.ts
 // Handles PDF export for the aluminum quote app
 
+import type { DocumentType } from "./types";
+import { documentTypeFolderName, normalizeDocumentType } from "./types";
+
 // Check if running in Tauri
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -8,7 +11,12 @@ function isTauri(): boolean {
 
 // Get save path and create folder structure for PDFs
 // If customFolder is provided, use it; otherwise use Desktop
-async function getPdfSavePath(filename: string, year: number, customFolder?: string): Promise<string | null> {
+async function getPdfSavePath(
+  filename: string,
+  year: number,
+  customFolder?: string,
+  documentType?: DocumentType
+): Promise<string | null> {
   if (!isTauri()) {
     return null; // Browser - use download
   }
@@ -103,14 +111,15 @@ async function getPdfSavePath(filename: string, year: number, customFolder?: str
     
     // Build folder structure using path.join for proper path handling
     // [BASE_PATH]/[YEAR]/filename.pdf
-    // If using Desktop, add "הצעת מחיר" folder; otherwise use base directly
+    // If using Desktop, add document-type folder; otherwise use base directly
+    const typeFolder = documentTypeFolderName(documentType);
     let quotesFolder: string;
     if (customFolder && customFolder.trim()) {
       // Custom folder: organize directly by year
       quotesFolder = basePath;
     } else {
-      // Desktop: use "הצעת מחיר" subfolder
-      quotesFolder = await pathApi.join(basePath, "הצעת מחיר");
+      // Desktop: use type subfolder (הצעת מחיר / חשבון עסקה)
+      quotesFolder = await pathApi.join(basePath, typeFolder);
     }
     
     const yearFolder = await pathApi.join(quotesFolder, String(year));
@@ -275,15 +284,22 @@ export interface PdfFreeFormAddition {
 
 export interface PdfQuotePayload {
   title: string;
+  documentType?: DocumentType;
+  documentNumber?: number;
   customerName: string;
   customerPhone?: string;
   customerEmail?: string;
+  pdfDateMs?: number;
   notes?: string;
   taxPercentText: string; // e.g. "18" or "0.18"
   items: PdfLineItem[];
   freeFormAdditions?: PdfFreeFormAddition[];
   pdfSaveFolder?: string; // Optional custom folder path for saving PDFs
   dimensionUnit?: "cm" | "mm"; // display dimensions in cm or mm (data is stored in cm)
+  /** When false, do not draw the overall totals box (מחיר/מע״מ/סה״כ) */
+  showTotals?: boolean;
+  /** When true and the target PDF already exists, skip rewriting it (keeps file modified date). */
+  skipWriteIfUnchanged?: boolean;
 }
 
 export type PdfExportResult = { success: true; savedPath: string } | { success: false; error: string };
@@ -439,15 +455,25 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 
 // --------- MAIN PUBLIC API ---------
 
-/** Build filename for PDF (customer name + date). */
-function getPdfFilename(customerName: string): string {
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
+/** Build filename for PDF (customer name + optional doc number + date). */
+function getPdfFilename(
+  customerName: string,
+  pdfDateMs?: number,
+  documentType?: DocumentType,
+  documentNumber?: number
+): string {
+  const sourceDate = pdfDateMs ? new Date(pdfDateMs) : new Date();
+  const yyyy = sourceDate.getFullYear();
+  const mm = String(sourceDate.getMonth() + 1).padStart(2, "0");
+  const dd = String(sourceDate.getDate()).padStart(2, "0");
   const datePart = `${yyyy}-${mm}-${dd}`;
   const nameForFile = (customerName || "לקוח ללא שם").trim().replace(/^לכבוד\s+/, "");
   const safeBase = nameForFile.replace(/[\\/:*?"<>|]/g, "_");
+  const type = normalizeDocumentType(documentType);
+  if (type === "payment_request" && documentNumber != null && documentNumber > 0) {
+    const numPart = String(Math.floor(documentNumber)).padStart(4, "0");
+    return `${safeBase} חשבון-${numPart} ${datePart}.pdf`;
+  }
   return `${safeBase} ${datePart}.pdf`;
 }
 
@@ -459,6 +485,46 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
   }
   if (!payload.items.length && (!payload.freeFormAdditions || payload.freeFormAdditions.length === 0)) {
     return { success: false, error: "ההצעה ריקה. הוסף/י פריטים לפני יצוא PDF." };
+  }
+
+  const pdfSourceDate = payload.pdfDateMs ? new Date(payload.pdfDateMs) : new Date();
+  const yyyy = pdfSourceDate.getFullYear();
+  const documentType = normalizeDocumentType(payload.documentType);
+  const filename = getPdfFilename(
+    customerName,
+    payload.pdfDateMs,
+    documentType,
+    payload.documentNumber
+  );
+
+  // When nothing changed, reuse the existing PDF file (content date + file modified date stay the same).
+  if (payload.skipWriteIfUnchanged && isTauri()) {
+    try {
+      const fsModule = await import("@tauri-apps/plugin-fs");
+      let savePath = await getPdfSavePath(
+        filename,
+        yyyy,
+        payload.pdfSaveFolder,
+        documentType
+      );
+      if (!savePath && payload.pdfSaveFolder?.trim()) {
+        const pathModule = await import("@tauri-apps/api/path");
+        const base = payload.pdfSaveFolder.trim();
+        const yearFolder = await pathModule.join(base, String(yyyy));
+        savePath = await pathModule.join(yearFolder, filename);
+      }
+      if (savePath && (await fsModule.exists(savePath))) {
+        console.log("Quote unchanged — reusing existing PDF:", savePath);
+        try {
+          await revealPdfFile(savePath);
+        } catch (revealErr: any) {
+          console.warn("Could not reveal existing PDF:", revealErr?.message || revealErr);
+        }
+        return { success: true, savedPath: savePath };
+      }
+    } catch (earlyReuseErr: any) {
+      console.warn("Early reuse check failed, will regenerate PDF:", earlyReuseErr?.message || earlyReuseErr);
+    }
   }
 
   // Use pdf-lib for PDF generation - proper Unicode/Hebrew support (embeds font from CDN, no local fonts needed)
@@ -478,18 +544,6 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     };
   }
 
-  // ===== Filename: "<CustomerName> YYYY-MM-DD.pdf" =====
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  const datePart = `${yyyy}-${mm}-${dd}`;
-
-  // Remove "לכבוד " prefix from customer name for filename
-  const nameForFile = (customerName || "לקוח ללא שם").trim().replace(/^לכבוד\s+/, "");
-  const safeBase = nameForFile.replace(/[\\/:*?"<>|]/g, "_");
-  const filename = `${safeBase} ${datePart}.pdf`;
-
   // 🔹 IMPORTANT PART: Save PDF and open it
   // Check if we're in Tauri environment
   const isTauriEnv = isTauri();
@@ -499,10 +553,9 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
       console.log("=== PDF EXPORT START ===");
       console.log("Tauri environment detected, saving PDF...");
       
-      // In Tauri: Save to Desktop/הצעת מחיר/[YEAR]/ and open with default viewer
+      // In Tauri: Save to Desktop/{document type}/[YEAR]/ and open with default viewer
       const fsModule = await import("@tauri-apps/plugin-fs");
       const openerModule = await import("@tauri-apps/plugin-opener");
-      const shellModule = await import("@tauri-apps/plugin-shell");
       const pathModule = await import("@tauri-apps/api/path");
       const dialogModule = await import("@tauri-apps/plugin-dialog");
       
@@ -510,7 +563,12 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
       console.log("fsModule methods:", Object.keys(fsModule));
       
       // Get save path: [CUSTOM_FOLDER or Desktop]/[YEAR]/filename.pdf
-      let savePath = await getPdfSavePath(filename, yyyy, payload.pdfSaveFolder);
+      let savePath = await getPdfSavePath(
+        filename,
+        yyyy,
+        payload.pdfSaveFolder,
+        documentType
+      );
       
       if (!savePath && payload.pdfSaveFolder && payload.pdfSaveFolder.trim()) {
         console.warn("getPdfSavePath returned null; using shown folder path");
@@ -693,54 +751,16 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
         throw writeError;
       }
       
-      // Open folder in Explorer with the PDF file selected (so user sees where it was saved)
+      // Reveal the exported PDF in the file manager (select the file on Windows)
       try {
-        const { Command } = shellModule;
-        // Windows: explorer /select,"path" — comma after /select is required
-        const selectArg = "/select,\"" + finalSavePath.replace(/"/g, "\\\"") + "\"";
-        let explorerCommand;
-        if (typeof Command.create === "function") {
-          explorerCommand = Command.create("explorer", [selectArg]);
-        } else if (typeof Command === "function") {
-          explorerCommand = new (Command as any)("explorer", [selectArg]);
-        } else {
-          throw new Error("Command API not available");
-        }
-        await explorerCommand.execute();
-        console.log("✓ Folder opened with PDF selected!");
-      } catch (explorerError: any) {
-        console.warn("⚠ Failed to open folder with selection, trying open folder only:", explorerError?.message || explorerError);
-        try {
-          const folderPathToOpen = await pathModule.dirname(finalSavePath);
-          await openerModule.openPath(folderPathToOpen);
-          console.log("✓ Folder opened (file not selected)");
-        } catch (fallbackErr: any) {
-          console.warn("⚠ Could not open folder:", fallbackErr?.message || fallbackErr);
-        }
+        await revealPdfFile(finalSavePath);
+        console.log("✓ Revealed PDF in file manager");
+      } catch (revealErr: any) {
+        console.warn("⚠ Could not reveal PDF in file manager:", revealErr?.message || revealErr);
       }
       
-      // Open PDF with system's default PDF viewer (silently fail if it doesn't work)
-      try {
-        console.log("Attempting to open PDF with system viewer...");
-        // Try to scope the file path before opening (if method exists)
-        try {
-          const fsModuleAny = fsModule as any;
-          if (typeof fsModuleAny.scope === "function") {
-            await fsModuleAny.scope(finalSavePath, { recursive: false });
-            console.log("✓ Scoped file path for opening");
-          }
-        } catch (scopeErr) {
-          console.warn("⚠ Could not scope file path:", scopeErr);
-        }
-        
-        await openerModule.openPath(finalSavePath);
-        console.log("✓ PDF opened successfully!");
-      } catch (openError: any) {
-        // Silently fail - don't show error to user since PDF was saved successfully
-        console.warn("⚠ Could not open PDF file (but it was saved successfully):", openError?.message || openError);
-        // The PDF was saved, which is the important part
-        // User can manually open it from the folder
-      }
+      // Note: we intentionally do NOT auto-open the PDF viewer here.
+      // Revealing the file in Explorer (selected) is the fastest way to find it.
       
       console.log("=== PDF EXPORT COMPLETE ===");
       return { success: true, savedPath: finalSavePath };
@@ -769,8 +789,109 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
   }
 }
 
+export type PdfPrintResult = { success: true } | { success: false; error: string };
+
+/**
+ * Build the quote PDF and open it in a viewer so the user can print
+ * and choose a printer (system print dialog / PDF app Print).
+ */
+export async function printQuotePdf(payload: PdfQuotePayload): Promise<PdfPrintResult> {
+  const { customerName } = payload;
+
+  if (!customerName.trim()) {
+    return { success: false, error: "אנא הזן/י שם לקוח לפני הדפסה" };
+  }
+  if (!payload.items.length && (!payload.freeFormAdditions || payload.freeFormAdditions.length === 0)) {
+    return { success: false, error: "ההצעה ריקה. הוסף/י פריטים לפני הדפסה." };
+  }
+
+  let pdfArrayBuffer: ArrayBuffer;
+  try {
+    const { buildQuotePdfBytes } = await import("./buildPdfWithPdfLib");
+    const pdfBytes = await buildQuotePdfBytes(payload);
+    pdfArrayBuffer = pdfBytes.buffer.slice(
+      pdfBytes.byteOffset,
+      pdfBytes.byteOffset + pdfBytes.byteLength
+    );
+  } catch (e: any) {
+    console.error("PDF generation failed (print):", e);
+    return {
+      success: false,
+      error: `שגיאה ביצירת PDF להדפסה: ${e?.message || String(e)}`,
+    };
+  }
+
+  const filename = getPdfFilename(
+    customerName,
+    payload.pdfDateMs,
+    normalizeDocumentType(payload.documentType),
+    payload.documentNumber
+  );
+
+  if (isTauri()) {
+    try {
+      // Write to TEMP only — avoids Desktop/subfolder scope issues (exists/mkdir).
+      // Print does not need the permanent export folder; export handles that.
+      const fsModule = await import("@tauri-apps/plugin-fs");
+      const openerModule = await import("@tauri-apps/plugin-opener");
+      const pathModule = await import("@tauri-apps/api/path");
+
+      const temp = await pathModule.tempDir();
+      const printDir = await pathModule.join(temp, "AluPrice-print");
+      try {
+        await fsModule.mkdir(printDir, { recursive: true });
+      } catch {
+        // Directory may already exist
+      }
+      const filePath = await pathModule.join(printDir, filename);
+
+      await fsModule.writeFile(filePath, new Uint8Array(pdfArrayBuffer));
+      await openerModule.openPath(filePath);
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error opening PDF for print:", error);
+      return {
+        success: false,
+        error: error?.message || String(error) || "לא ניתן לפתוח את ה-PDF להדפסה",
+      };
+    }
+  }
+
+  // Browser: open PDF in a new tab and show the print dialog
+  try {
+    const blob = new Blob([pdfArrayBuffer], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const printWindow = window.open(url, "_blank");
+    if (!printWindow) {
+      URL.revokeObjectURL(url);
+      return { success: false, error: "הדפדפן חסם את חלון ההדפסה. אפשר חלונות קופצים ונסה שוב." };
+    }
+    const tryPrint = () => {
+      try {
+        printWindow.focus();
+        printWindow.print();
+      } catch (err) {
+        console.warn("Could not auto-open print dialog:", err);
+      }
+    };
+    // PDF viewers often don't fire load reliably — retry shortly after open
+    printWindow.addEventListener("load", () => setTimeout(tryPrint, 400));
+    setTimeout(tryPrint, 800);
+    setTimeout(() => URL.revokeObjectURL(url), 120_000);
+    return { success: true };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error?.message || String(error) || "שגיאה בהדפסת PDF",
+    };
+  }
+}
+
 /** Returns the folder path where PDFs are (or will be) saved. Null if not in Tauri. */
-export async function getPdfSaveFolderPath(customFolder?: string): Promise<string | null> {
+export async function getPdfSaveFolderPath(
+  customFolder?: string,
+  documentType?: DocumentType
+): Promise<string | null> {
   if (!isTauri()) return null;
   try {
     const pathApi = await import("@tauri-apps/api/path");
@@ -785,7 +906,7 @@ export async function getPdfSaveFolderPath(customFolder?: string): Promise<strin
         const homeDir = await pathApi.homeDir();
         basePath = await pathApi.join(homeDir, "Desktop");
       }
-      basePath = await pathApi.join(basePath, "הצעת מחיר");
+      basePath = await pathApi.join(basePath, documentTypeFolderName(documentType));
     }
     const yearFolder = await pathApi.join(basePath, String(year));
     return yearFolder;
@@ -794,15 +915,21 @@ export async function getPdfSaveFolderPath(customFolder?: string): Promise<strin
   }
 }
 
-/** Opens the folder where PDF files are saved (the one shown in the UI). */
-export async function openPdfSaveFolder(customFolder?: string): Promise<{ success: boolean; error?: string }> {
+/** Opens the folder where PDF files are saved (year subfolder that actually contains the PDFs). */
+export async function openPdfSaveFolder(
+  customFolder?: string,
+  documentType?: DocumentType
+): Promise<{ success: boolean; error?: string }> {
   if (!isTauri()) {
     return { success: false, error: "זמין רק באפליקציה" };
   }
-  const folderPath =
-    customFolder && customFolder.trim()
-      ? customFolder.trim()
-      : await getPdfSaveFolderPath(undefined);
+
+  // Always resolve to the **year folder** that holds the PDFs
+  const folderPath = await getPdfSaveFolderPath(
+    customFolder && customFolder.trim() ? customFolder.trim() : undefined,
+    documentType
+  );
+
   if (!folderPath) return { success: false, error: "לא ניתן לקבוע את נתיב התיקייה" };
 
   try {
@@ -828,6 +955,37 @@ export async function openPdfSaveFolder(customFolder?: string): Promise<{ succes
   }
 }
 
+/** Reveal a specific PDF file in the OS file manager (Windows: selects the file). */
+export async function revealPdfFile(savedPath: string): Promise<{ success: boolean; error?: string }> {
+  if (!isTauri()) return { success: false, error: "זמין רק באפליקציה" };
+  const filePath = (savedPath ?? "").trim();
+  if (!filePath) return { success: false, error: "נתיב קובץ לא תקין" };
+
+  try {
+    // Best UX on Windows: open Explorer with the file selected
+    const shell = await import("@tauri-apps/plugin-shell");
+    const { Command } = shell;
+
+    const cmd =
+      typeof Command.create === "function"
+        ? Command.create("explorer", ["/select,", filePath])
+        : new (Command as any)("explorer", ["/select,", filePath]);
+    await cmd.execute();
+    return { success: true };
+  } catch (e: any) {
+    // Fallback: open the containing folder
+    try {
+      const pathApi = await import("@tauri-apps/api/path");
+      const opener = await import("@tauri-apps/plugin-opener");
+      const folder = await pathApi.dirname(filePath);
+      await opener.openPath(folder);
+      return { success: true };
+    } catch (fallbackErr: any) {
+      return { success: false, error: fallbackErr?.message || e?.message || String(fallbackErr ?? e) };
+    }
+  }
+}
+
 // ---- internal: table drawing (columns are RTL, with profile + wrapped text) ----
 
 function drawItemsTable(
@@ -850,10 +1008,10 @@ function drawItemsTable(
   // מס׳ | פרופיל | מידות | מיקום | פרטים | מחיר ליח׳ | כמות | סה״כ
   const colWidths = {
     num: 25,
-    profile: 80,
-    dims: 65,
-    location: 60,
-    details: 120,
+    profile: 78,
+    dims: 78,
+    location: 58,
+    details: 111,
     unitPrice: 65,
     qty: 30,
     total: 70,
@@ -897,7 +1055,7 @@ function drawItemsTable(
       colWidths.qty,
   };
 
-  const headerHeight = 24;
+  const headerHeight = 36;
   const rowLineHeight = 14;
   let y = startY;
 
@@ -914,34 +1072,50 @@ function drawItemsTable(
     doc.roundedRect(left, y, right - left, headerHeight, 6, 6);
 
     const centerY = y + headerHeight / 2 + 4;
+    const dimsCenterX = colX.dims - colWidths.dims / 2;
 
     doc.setFont(fontName, "bold");
     doc.setFontSize(13);
-    drawTextSmart(doc, "מס׳", colX.num - 4, centerY, { align: "right" });
-    drawTextSmart(doc, "פרופיל", colX.profile - 4, centerY, {
-      align: "right",
+    drawTextSmart(doc, "מס׳", colX.num - colWidths.num / 2, centerY, {
+      align: "center",
     });
+    drawTextSmart(doc, "פרופיל", colX.profile - colWidths.profile / 2, centerY, {
+      align: "center",
+    });
+    // מידות: title + order hint (width × height)
+    doc.setFontSize(11);
     drawTextSmart(
       doc,
       dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)",
-      colX.dims - 4,
-      centerY,
-      { align: "right" }
+      dimsCenterX,
+      y + 14,
+      { align: "center" }
     );
-    drawTextSmart(doc, "מיקום", colX.location - 4, centerY, {
-      align: "right",
+    doc.setFontSize(8);
+    // Keep LTR order so רוחב sits with the left number and גובה with the right (matches WxH values)
+    drawTextSmart(doc, "רוחב × גובה", dimsCenterX, y + 26, {
+      align: "center",
+      forceRtl: false,
     });
-    drawTextSmart(doc, "פרטים", colX.details - 4, centerY, {
-      align: "right",
+    doc.setFontSize(13);
+    drawTextSmart(doc, "מיקום", colX.location - colWidths.location / 2, centerY, {
+      align: "center",
     });
-    drawTextSmart(doc, "מחיר ליח׳", colX.unitPrice - 4, centerY, {
-      align: "right",
+    drawTextSmart(doc, "פרטים", colX.details - colWidths.details / 2, centerY, {
+      align: "center",
     });
-    drawTextSmart(doc, "כמות", colX.qty - 4, centerY, {
-      align: "right",
+    drawTextSmart(
+      doc,
+      "מחיר ליח׳",
+      colX.unitPrice - colWidths.unitPrice / 2,
+      centerY,
+      { align: "center" }
+    );
+    drawTextSmart(doc, "כמות", colX.qty - colWidths.qty / 2, centerY, {
+      align: "center",
     });
-    drawTextSmart(doc, "סה״כ", colX.total - 4, centerY, {
-      align: "right",
+    drawTextSmart(doc, "סה״כ", colX.total - colWidths.total / 2, centerY, {
+      align: "center",
     });
     doc.setFont(fontName, "bold");
     doc.setFontSize(12);
@@ -1007,10 +1181,15 @@ function drawItemsTable(
     const qtyStr = moneyNumberFmt.format(qty);
     const totalStr = formatNumberPdf(lineTotal); // No ₪ symbol
 
-    // Wrap long profile text inside its column
+    // Wrap long text inside each column so cells never spill into neighbors
     const profileMaxWidth = colWidths.profile - 8;
     const profileLines = profileStr
       ? doc.splitTextToSize(profileStr, profileMaxWidth)
+      : [];
+
+    const locationMaxWidth = colWidths.location - 8;
+    const locationLines = locStr
+      ? doc.splitTextToSize(locStr, locationMaxWidth)
       : [];
 
     const detailsMaxWidth = colWidths.details - 8;
@@ -1024,6 +1203,9 @@ function drawItemsTable(
       ? doc.splitTextToSize(unitPriceStr, unitPriceMaxWidth)
       : [];
 
+    const qtyMaxWidth = colWidths.qty - 8;
+    const qtyLines = qtyStr ? doc.splitTextToSize(qtyStr, qtyMaxWidth) : [];
+
     const totalMaxWidth = colWidths.total - 8;
     const totalLines = totalStr
       ? doc.splitTextToSize(totalStr, totalMaxWidth)
@@ -1032,8 +1214,10 @@ function drawItemsTable(
     const linesCount = Math.max(
       1,
       profileLines.length,
+      locationLines.length,
       detailsLines.length,
       unitPriceLines.length,
+      qtyLines.length,
       totalLines.length
     );
     const rowHeight = linesCount * rowLineHeight + 6;
@@ -1057,70 +1241,39 @@ function drawItemsTable(
     doc.setFont(fontName, "bold");
     doc.setFontSize(12);
 
+    const drawColLines = (lines: string[], x: number, opts?: { forceRtl?: boolean }) => {
+      let py = baseline;
+      lines.forEach((line: string) => {
+        drawTextSmart(doc, line, x, py, { align: "right", ...opts });
+        py += rowLineHeight;
+      });
+    };
+
     // מס'
     drawTextSmart(doc, numStr, colX.num - 4, baseline, { align: "right" });
 
     // פרופיל (wrapped)
-    if (profileLines.length > 0) {
-      let py = baseline;
-      profileLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.profile - 4, py, {
-          align: "right",
-        });
-        py += rowLineHeight;
-      });
+    drawColLines(profileLines, colX.profile - 4);
+
+    // מידות – keep on one line so WxH is easy to read
+    if (dims) {
+      drawTextSmart(doc, dims, colX.dims - 4, baseline, { align: "right" });
     }
 
-    // מידות
-    drawTextSmart(doc, dims, colX.dims - 4, baseline, { align: "right" });
-
-    // מיקום
-    if (locStr) {
-      drawTextSmart(doc, locStr, colX.location - 4, baseline, {
-        align: "right",
-      });
-    }
+    // מיקום (wrapped)
+    drawColLines(locationLines, colX.location - 4);
 
     // פרטים (wrapped)
-    if (detailsLines.length > 0) {
-      let dy = baseline;
-      detailsLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.details - 4, dy, {
-          align: "right",
-        });
-        dy += rowLineHeight;
-      });
-    }
+    drawColLines(detailsLines, colX.details - 4);
 
     // מחיר ליח׳ – wrapped text
-    if (unitPriceLines.length > 0) {
-      let upy = baseline;
-      unitPriceLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.unitPrice - 4, upy, {
-          align: "right",
-          forceRtl: false,
-        });
-        upy += rowLineHeight;
-      });
-    }
+    drawColLines(unitPriceLines, colX.unitPrice - 4, { forceRtl: false });
 
-    // כמות
-    drawTextSmart(doc, qtyStr, colX.qty - 4, baseline, {
-      align: "right",
-      forceRtl: false,
-    });
+    // כמות (wrapped)
+    drawColLines(qtyLines, colX.qty - 4, { forceRtl: false });
 
     // סה"כ – wrapped text
-    if (totalLines.length > 0) {
-      let ty = baseline;
-      totalLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.total - 4, ty, {
-          align: "right",
-          forceRtl: false,
-        });
-        ty += rowLineHeight;
-      });
-    }
+    drawColLines(totalLines, colX.total - 4, { forceRtl: false });
 
     y += rowHeight;
   });
@@ -1131,11 +1284,17 @@ function drawItemsTable(
     const qty = Math.max(0, parseLooseNumber(add.qty));
     const total = price * qty;
 
-    // Calculate wrapped lines for unit price and total
+    // Calculate wrapped lines for name, unit price and total
     const freeFormUnitPriceStr = formatNumberPdf(price);
     const unitPriceMaxWidth = colWidths.unitPrice - 8;
     const freeFormUnitPriceLines = freeFormUnitPriceStr
       ? doc.splitTextToSize(freeFormUnitPriceStr, unitPriceMaxWidth)
+      : [];
+
+    const freeFormQtyStr = moneyNumberFmt.format(qty);
+    const qtyMaxWidth = colWidths.qty - 8;
+    const freeFormQtyLines = freeFormQtyStr
+      ? doc.splitTextToSize(freeFormQtyStr, qtyMaxWidth)
       : [];
 
     const freeFormTotalStr = formatNumberPdf(total);
@@ -1144,10 +1303,17 @@ function drawItemsTable(
       ? doc.splitTextToSize(freeFormTotalStr, totalMaxWidth)
       : [];
 
+    const freeFormDetailsMaxWidth = colWidths.details - 8;
+    const freeFormDetailsLines = add.name
+      ? doc.splitTextToSize(add.name, freeFormDetailsMaxWidth)
+      : [];
+
     // Calculate row height based on wrapped text
     const freeFormLinesCount = Math.max(
       1,
+      freeFormDetailsLines.length,
       freeFormUnitPriceLines.length,
+      freeFormQtyLines.length,
       freeFormTotalLines.length
     );
     const rowHeight = freeFormLinesCount * rowLineHeight + 6;
@@ -1168,6 +1334,14 @@ function drawItemsTable(
     drawRowBorders(rowHeight, rowTop);
     doc.setFont(fontName, "bold");
 
+    const drawColLines = (lines: string[], x: number, opts?: { forceRtl?: boolean }) => {
+      let py = baseline;
+      lines.forEach((line: string) => {
+        drawTextSmart(doc, line, x, py, { align: "right", ...opts });
+        py += rowLineHeight;
+      });
+    };
+
     // מס'
     const numStr = String(items.length + addIdx + 1);
     drawTextSmart(doc, numStr, colX.num - 4, baseline, { align: "right" });
@@ -1176,46 +1350,17 @@ function drawItemsTable(
     // מידות - empty for free-form
     // מיקום - empty for free-form
 
-    // פרטים - show the name
-    if (add.name) {
-      const detailsMaxWidth = colWidths.details - 8;
-      const detailsLines = doc.splitTextToSize(add.name, detailsMaxWidth);
-      let dy = baseline;
-      detailsLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.details - 4, dy, { align: "right" });
-        dy += rowLineHeight;
-      });
-    }
+    // פרטים - show the name (wrapped)
+    drawColLines(freeFormDetailsLines, colX.details - 4);
 
     // מחיר ליח׳ – wrapped text, no ₪ symbol
-    if (freeFormUnitPriceLines.length > 0) {
-      let upy = baseline;
-      freeFormUnitPriceLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.unitPrice - 4, upy, {
-          align: "right",
-          forceRtl: false,
-        });
-        upy += rowLineHeight;
-      });
-    }
+    drawColLines(freeFormUnitPriceLines, colX.unitPrice - 4, { forceRtl: false });
 
     // כמות
-    drawTextSmart(doc, moneyNumberFmt.format(qty), colX.qty - 4, baseline, {
-      align: "right",
-      forceRtl: false,
-    });
+    drawColLines(freeFormQtyLines, colX.qty - 4, { forceRtl: false });
 
     // סה"כ – wrapped text, no ₪ symbol
-    if (freeFormTotalLines.length > 0) {
-      let ty = baseline;
-      freeFormTotalLines.forEach((line: string) => {
-        drawTextSmart(doc, line, colX.total - 4, ty, {
-          align: "right",
-          forceRtl: false,
-        });
-        ty += rowLineHeight;
-      });
-    }
+    drawColLines(freeFormTotalLines, colX.total - 4, { forceRtl: false });
 
     y += rowHeight;
   });

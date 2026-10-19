@@ -101,32 +101,55 @@ h3 { font-size: 1.5rem; font-weight: 700; }    /* ~29px */
   min-width: 600px; /* fit window margins without horizontal scroll */
 }
 
-/* Quote items table: fixed layout so פרטים column wraps instead of overlapping */
+/* Quote items table: fixed layout so every column wraps instead of overlapping */
 .table-quote-items {
   table-layout: fixed;
+}
+.table-quote-items th,
+.table-quote-items td {
+  min-width: 0;
+  overflow: hidden;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  vertical-align: top;
 }
 .table-quote-items th.td-details-col,
 .table-quote-items td.td-details-col {
   width: 12rem;
   max-width: 12rem;
-  min-width: 0;
-  overflow: hidden;
-  word-wrap: break-word;
-  word-break: break-word;
-  white-space: normal;
 }
 .table-quote-items th.td-wrap-col,
 .table-quote-items td.td-wrap-col {
   max-width: 10rem;
-  min-width: 0;
-  overflow: hidden;
-  word-wrap: break-word;
+}
+.table-quote-items th.td-nowrap-col,
+.table-quote-items td.td-nowrap-col {
+  width: 8rem;
+  min-width: 8rem;
+  white-space: nowrap;
+  overflow: visible;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.table-quote-items td.td-nowrap-col button,
+.table-quote-items td.td-nowrap-col input {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.table-quote-items th {
+  white-space: nowrap; /* keep header labels on one line */
+}
+.table-quote-items td button,
+.table-quote-items td input {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
-}
-.table-quote-items th.td-details-col,
-.table-quote-items th.td-wrap-col {
-  white-space: nowrap; /* keep header labels on one line */
 }
 
 /* Focus rings */
