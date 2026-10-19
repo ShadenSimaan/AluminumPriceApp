@@ -1,8 +1,8 @@
 // FILE: src/App.tsx
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Settings } from "lucide-react";
-import { exportQuotePdf, openPdfSaveFolder } from "./pdfExporter";
-import { AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, NotesPreset } from "./types";
+import { exportQuotePdf, openPdfSaveFolder, printQuotePdf } from "./pdfExporter";
+import { AppCurrentState, AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, Quote, DocumentType, documentTypeLabel, normalizeDocumentType } from "./types";
 import { readStateFromFile, writeStateToFile, isTauri, getDataFilePath } from "./storage";
 import QuotePage from "./QuotePage";
 import CustomersPage from "./CustomersPage";
@@ -27,6 +27,30 @@ function parseLooseNumber(s: string): number {
   const cleaned = s.replace(/[^\d.,-]/g, "").replace(",", ".");
   const n = parseFloat(cleaned);
   return isFinite(n) ? n : 0;
+}
+
+/** Ask for confirmation before a destructive action (Tauri dialog or browser confirm). */
+async function confirmDestructive(
+  message: string,
+  options?: { title?: string; okLabel?: string; cancelLabel?: string }
+): Promise<boolean> {
+  const title = options?.title ?? "אישור מחיקה";
+  const okLabel = options?.okLabel ?? "כן, מחק";
+  const cancelLabel = options?.cancelLabel ?? "ביטול";
+  if (isTauri()) {
+    try {
+      const dialogModule = await import("@tauri-apps/plugin-dialog");
+      return await dialogModule.confirm(message, {
+        title,
+        kind: "warning",
+        okLabel,
+        cancelLabel,
+      });
+    } catch {
+      return window.confirm(message);
+    }
+  }
+  return window.confirm(message);
 }
 
 // Accept 0.18 or 18, return decimal (0.18)
@@ -69,31 +93,30 @@ function createAddonsFromGlobal(globalAddons: Addon[]): Addon[] {
   return globalAddons.map((a) => ({ ...a, checked: false }));
 }
 
-const defaultNotesPresets: NotesPreset[] = [
-  { id: "preset-1", label: "תשלום 14 יום", text: "תשלום בתוך 14 יום.\nמשלוח בהתאם להזמנה." },
-];
-
 /** ===== Default state ===== */
 const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
   profiles: defaultProfiles,
   addons: defaultAddonsPreset.map((a) => ({ ...a })),
-  notesPresets: defaultNotesPresets,
   current: {
     customerName: "",
     customerPhone: "",
     customerEmail: "",
     customerNotes: "",
     title: "הצעת מחיר",
+    documentType: "quote",
+    documentNumber: undefined,
     items: [],
     freeFormAdditions: [],
     taxPercentText: "18",
     notes: "",
+    showTotals: true,
   },
   ui: { tab: "quote", settingsOpen: false, profilesSettingsOpen: false },
   pdfSaveFolder: undefined,
   dimensionUnit: "cm",
+  nextPaymentRequestNumber: 1,
 };
 
 /** ===== Normalize a raw object into valid AppState (for LS or data file) ===== */
@@ -101,34 +124,50 @@ function normalizeState(obj: unknown): AppState {
   const o: Partial<AppState> =
     typeof obj === "object" && obj !== null ? (obj as Partial<AppState>) : {};
   const customers = Array.isArray(o.customers) ? o.customers : [];
-  const quotes = Array.isArray(o.quotes) ? o.quotes : [];
+  const quotesRaw = Array.isArray(o.quotes) ? o.quotes : [];
+  const quotes: Quote[] = quotesRaw.map((q: any) => {
+    const documentType = normalizeDocumentType(q?.documentType);
+    const documentNumber =
+      documentType === "payment_request" &&
+      typeof q?.documentNumber === "number" &&
+      isFinite(q.documentNumber) &&
+      q.documentNumber > 0
+        ? Math.floor(q.documentNumber)
+        : undefined;
+    return {
+      ...q,
+      documentType,
+      documentNumber,
+      title: q?.title || documentTypeLabel(documentType),
+    };
+  });
   const profiles =
     Array.isArray(o.profiles) && o.profiles.length > 0 ? o.profiles : defaultProfiles;
   const addons =
     Array.isArray(o.addons) && o.addons.length > 0
       ? o.addons
       : defaultAddonsPreset.map((a) => ({ ...a }));
-  const notesPresets: NotesPreset[] =
-    Array.isArray(o.notesPresets) && o.notesPresets.length > 0
-      ? o.notesPresets
-          .map((p: any) => ({
-            id: typeof p.id === "string" ? p.id : uuid(),
-            label: String(p.label ?? ""),
-            text: String(p.text ?? ""),
-          }))
-          .filter((p) => p.label.trim() || p.text.trim())
-      : defaultNotesPresets;
   const currentRaw: any = o.current ?? {};
+  const currentDocumentType = normalizeDocumentType(currentRaw.documentType);
+  const currentDocumentNumber =
+    typeof currentRaw.documentNumber === "number" &&
+    isFinite(currentRaw.documentNumber) &&
+    currentRaw.documentNumber > 0
+      ? Math.floor(currentRaw.documentNumber)
+      : undefined;
   const current = {
     customerName: String(currentRaw.customerName ?? ""),
     customerPhone: String(currentRaw.customerPhone ?? ""),
     customerEmail: String(currentRaw.customerEmail ?? ""),
     customerNotes: String(currentRaw.customerNotes ?? ""),
-    title: String(currentRaw.title ?? "הצעת מחיר"),
+    title: String(currentRaw.title ?? documentTypeLabel(currentDocumentType)),
+    documentType: currentDocumentType,
+    documentNumber: currentDocumentNumber,
     items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
     freeFormAdditions: Array.isArray(currentRaw.freeFormAdditions) ? currentRaw.freeFormAdditions : [],
     taxPercentText: String(currentRaw.taxPercentText ?? "18"),
     notes: String(currentRaw.notes ?? ""),
+    showTotals: currentRaw.showTotals !== false,
   };
   const uiRaw: any = o.ui ?? {};
   const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
@@ -139,7 +178,30 @@ function normalizeState(obj: unknown): AppState {
   };
   const pdfSaveFolder = typeof o.pdfSaveFolder === "string" ? o.pdfSaveFolder : undefined;
   const dimensionUnit = o.dimensionUnit === "mm" ? "mm" : "cm";
-  return { customers, quotes, profiles, addons, notesPresets, current, ui, pdfSaveFolder, dimensionUnit };
+
+  const maxExistingNumber = quotes.reduce((max, q) => {
+    const n = q.documentNumber;
+    return typeof n === "number" && n > max ? n : max;
+  }, 0);
+  const storedNext =
+    typeof o.nextPaymentRequestNumber === "number" &&
+    isFinite(o.nextPaymentRequestNumber) &&
+    o.nextPaymentRequestNumber > 0
+      ? Math.floor(o.nextPaymentRequestNumber)
+      : 1;
+  const nextPaymentRequestNumber = Math.max(storedNext, maxExistingNumber + 1);
+
+  return {
+    customers,
+    quotes,
+    profiles,
+    addons,
+    current,
+    ui,
+    pdfSaveFolder,
+    dimensionUnit,
+    nextPaymentRequestNumber,
+  };
 }
 
 /** ===== Validate + migrate any LS object to the proper shape ===== */
@@ -198,9 +260,140 @@ function upsertCustomerByName(
   };
 }
 
+function makeDuplicateCustomerName(s: AppState, baseName: string): string {
+  let candidate = `${baseName} (עותק)`;
+  let n = 1;
+  while (s.customers.some((c) => c.name === candidate)) {
+    n += 1;
+    candidate = `${baseName} (עותק ${n})`;
+  }
+  return candidate;
+}
+
+function cloneLineItemForDuplicate(it: LineItem): LineItem {
+  return {
+    ...it,
+    id: uuid(),
+    addons: it.addons.map((a) => ({ ...a, id: uuid() })),
+  };
+}
+
+function cloneQuoteForNewCustomer(
+  q: Quote,
+  newCustomerId: string,
+  opts?: { documentNumber?: number }
+): Quote {
+  const documentType = normalizeDocumentType(q.documentType);
+  return {
+    ...q,
+    id: uuid(),
+    customerId: newCustomerId,
+    documentType,
+    documentNumber:
+      documentType === "payment_request" ? opts?.documentNumber : undefined,
+    title: documentTypeLabel(documentType),
+    items: q.items.map(cloneLineItemForDuplicate),
+    freeFormAdditions: (q.freeFormAdditions ?? []).map((add) => ({ ...add, id: uuid() })),
+  };
+}
+
+function roundMoney(n: number) {
+  return Math.round(n * 100) / 100;
+}
+
+function normalizeLineItemForCompare(it: LineItem) {
+  return {
+    widthCm: it.widthCm,
+    heightCm: it.heightCm,
+    qty: it.qty,
+    profileId: it.profileId ?? "",
+    profileName: it.profileName ?? "",
+    unitPrice: it.unitPrice,
+    manualUnitPrice: it.manualUnitPrice ?? "",
+    location: it.location ?? "",
+    details: it.details ?? "",
+    subtotal: roundMoney(it.subtotal),
+    addons: (it.addons ?? []).map((a) => ({
+      name: a.name,
+      price: a.price,
+      checked: a.checked,
+    })),
+  };
+}
+
+function normalizeFreeFormAdditionForCompare(add: FreeFormAddition) {
+  return {
+    name: add.name,
+    price: add.price,
+    qty: add.qty,
+  };
+}
+
+function getProfilesSignature(profiles: Profile[]) {
+  return JSON.stringify(
+    profiles.map((p) => ({
+      id: p.id,
+      name: p.name,
+      unitPrice: p.unitPrice,
+    }))
+  );
+}
+
+function buildQuoteContentSnapshotFromCurrent(current: AppCurrentState) {
+  const documentType = normalizeDocumentType(current.documentType);
+  return {
+    title: current.title || documentTypeLabel(documentType),
+    documentType,
+    documentNumber: current.documentNumber ?? null,
+    customerPhone: current.customerPhone ?? "",
+    customerEmail: current.customerEmail ?? "",
+    notes: current.notes ?? "",
+    items: current.items.map(normalizeLineItemForCompare),
+    freeFormAdditions: current.freeFormAdditions.map(normalizeFreeFormAdditionForCompare),
+    taxPercent: parseLooseNumber(current.taxPercentText ?? "18"),
+    showTotals: current.showTotals !== false,
+  };
+}
+
+function buildQuoteContentSnapshotFromQuote(q: Quote) {
+  const documentType = normalizeDocumentType(q.documentType);
+  return {
+    title: q.title || documentTypeLabel(documentType),
+    documentType,
+    documentNumber: q.documentNumber ?? null,
+    customerPhone: q.customerPhone ?? "",
+    customerEmail: q.customerEmail ?? "",
+    notes: q.notes ?? "",
+    items: (q.items ?? []).map(normalizeLineItemForCompare),
+    freeFormAdditions: (q.freeFormAdditions ?? []).map(normalizeFreeFormAdditionForCompare),
+    taxPercent: q.taxPercent,
+    showTotals: q.showTotals !== false,
+  };
+}
+
+/** True when quote line items / notes / tax / profiles did not change since last save. */
+function quoteMatchesCurrentSnapshot(
+  existing: Quote | undefined,
+  current: AppCurrentState,
+  profilesSignature: string
+) {
+  if (!existing) return false;
+
+  const contentMatches =
+    JSON.stringify(buildQuoteContentSnapshotFromQuote(existing)) ===
+    JSON.stringify(buildQuoteContentSnapshotFromCurrent(current));
+  if (!contentMatches) return false;
+
+  const existingSig = existing.profilesSignature ?? "";
+  // Legacy quotes without a stored signature: keep the date if content matches.
+  if (!existingSig) return true;
+
+  return existingSig === profilesSignature;
+}
+
 function saveQuoteToState(
   s: AppState
-): { nextState: AppState; error?: string } {
+): { nextState: AppState; quote?: Quote; quoteUnchanged?: boolean; error?: string } {
   if (!s.current.customerName.trim()) {
     return { nextState: s, error: "אנא הזן/י שם לקוח" };
   }
@@ -228,26 +421,74 @@ function saveQuoteToState(
   );
   const taxValueLocal = subTotalLocal * taxDecimalLocal;
   const grandTotalLocal = subTotalLocal + taxValueLocal;
+  const totals = { sub: subTotalLocal, tax: taxValueLocal, grand: grandTotalLocal };
+  const existingQuote = withCustomer.quotes.find((q) => q.customerId === customer.id);
+  const profilesSignature = getProfilesSignature(withCustomer.profiles);
+  let quoteUnchanged = quoteMatchesCurrentSnapshot(
+    existingQuote,
+    withCustomer.current,
+    profilesSignature
+  );
+  const quoteDate = quoteUnchanged && existingQuote ? existingQuote.date : Date.now();
 
-  const quote = {
-    id: uuid(),
+  const documentType = normalizeDocumentType(withCustomer.current.documentType);
+  let nextPaymentRequestNumber =
+    typeof withCustomer.nextPaymentRequestNumber === "number" &&
+    withCustomer.nextPaymentRequestNumber > 0
+      ? Math.floor(withCustomer.nextPaymentRequestNumber)
+      : 1;
+  let documentNumber =
+    typeof withCustomer.current.documentNumber === "number" &&
+    withCustomer.current.documentNumber > 0
+      ? Math.floor(withCustomer.current.documentNumber)
+      : existingQuote?.documentNumber && existingQuote.documentNumber > 0
+        ? Math.floor(existingQuote.documentNumber)
+        : undefined;
+
+  if (documentType === "payment_request") {
+    if (documentNumber == null) {
+      documentNumber = nextPaymentRequestNumber;
+      nextPaymentRequestNumber += 1;
+      // Newly allocated serial must be written into the PDF
+      // (content snapshot may have matched before the number existed).
+      quoteUnchanged = false;
+    }
+  }
+
+  const quote: Quote = {
+    id: existingQuote?.id ?? uuid(),
     customerId: customer.id,
-    title: withCustomer.current.title || "הצעת מחיר",
-    date: Date.now(),
+    title: documentTypeLabel(documentType),
+    documentType,
+    documentNumber: documentType === "payment_request" ? documentNumber : undefined,
+    date: quoteDate,
+    customerPhone: withCustomer.current.customerPhone,
+    customerEmail: withCustomer.current.customerEmail,
+    notes: withCustomer.current.notes,
+    profilesSignature,
     items: withCustomer.current.items,
+    freeFormAdditions: withCustomer.current.freeFormAdditions,
     taxPercent: parseLooseNumber(withCustomer.current.taxPercentText ?? "18"),
-    totals: { sub: subTotalLocal, tax: taxValueLocal, grand: grandTotalLocal },
+    showTotals: withCustomer.current.showTotals,
+    totals,
   };
 
   const nextState: AppState = {
     ...withCustomer,
+    nextPaymentRequestNumber,
+    current: {
+      ...withCustomer.current,
+      title: documentTypeLabel(documentType),
+      documentType,
+      documentNumber: documentType === "payment_request" ? documentNumber : withCustomer.current.documentNumber,
+    },
     quotes: [
       ...withCustomer.quotes.filter((q) => q.customerId !== customer.id),
       quote,
     ],
   };
 
-  return { nextState };
+  return { nextState, quote, quoteUnchanged };
 }
 
 /** =========================
@@ -331,6 +572,9 @@ export default function App() {
     });
   }, []);
 
+  /** When loading a line into the item calculator for edit, skip one sync so מחיר למ״ר stays as on the line. */
+  const skipProfileUnitPriceSyncRef = useRef(false);
+
   // Keep active profile valid when profiles change
   useEffect(() => {
     setActiveProfileId((prev) => {
@@ -341,21 +585,31 @@ export default function App() {
 
   // When active profile changes, sync to item editor (name + price)
   useEffect(() => {
-    const p = state.profiles.find((p) => p.id === activeProfileId);
+    const p = state.profiles.find((pr) => pr.id === activeProfileId);
+    const preserveUnitPrice = skipProfileUnitPriceSyncRef.current;
+    skipProfileUnitPriceSyncRef.current = false;
     setItemEditor((e) => ({
       ...e,
       profileId: p?.id,
       profileName: p?.name ?? undefined,
-      unitPrice: p ? String(p.unitPrice) : "0",
+      unitPrice: preserveUnitPrice ? e.unitPrice : p ? String(p.unitPrice) : "0",
     }));
   }, [activeProfileId, state.profiles]);
 
-  function updateCurrent<K extends keyof AppState["current"]>(
-    key: K,
-    val: AppState["current"][K]
-  ) {
-    setState((s) => ({ ...s, current: { ...s.current, [key]: val } }));
-  }
+  const updateCurrent = useCallback(
+    <K extends keyof AppState["current"]>(key: K, val: AppState["current"][K]) => {
+      setState((s) => {
+        const current = { ...s.current, [key]: val };
+        if (key === "documentType") {
+          const documentType = normalizeDocumentType(val);
+          current.documentType = documentType;
+          current.title = documentTypeLabel(documentType);
+        }
+        return { ...s, current };
+      });
+    },
+    []
+  );
 
   function addItem(currentDraft: LineItem) {
     const widthCm = currentDraft.widthCm ?? "";
@@ -415,7 +669,13 @@ export default function App() {
     showToast("הפריט נוסף להצעה (הכל נשמר אוטומטית)", "success");
   }
 
-  function removeItem(id: string) {
+  async function removeItem(id: string) {
+    const item = state.current.items.find((it) => it.id === id);
+    const label = (item?.profileName ?? "").trim() || "פריט זה";
+    const confirmed = await confirmDestructive(
+      `האם אתה בטוח שברצונך למחוק את "${label}" מההצעה?`
+    );
+    if (!confirmed) return;
     setState((s) => ({
       ...s,
       current: {
@@ -428,11 +688,12 @@ export default function App() {
   function editItem(id: string) {
     const item = state.current.items.find((it) => it.id === id);
     if (!item) return;
+    skipProfileUnitPriceSyncRef.current = true;
     setItemEditor({ ...item });
     setActiveProfileId(item.profileId);
   }
 
-  function updateItem(id: string, updated: LineItem) {
+  const updateItem = useCallback((id: string, updated: LineItem) => {
     setState((s) => ({
       ...s,
       current: {
@@ -440,7 +701,7 @@ export default function App() {
         items: s.current.items.map((it) => (it.id === id ? updated : it)),
       },
     }));
-  }
+  }, []);
 
   function moveItemUp(id: string) {
     setState((s) => {
@@ -468,12 +729,17 @@ export default function App() {
     });
   }
 
-  function reorderFreeFormAdditions(reordered: FreeFormAddition[]) {
+  const reorderFreeFormAdditions = useCallback((reordered: FreeFormAddition[]) => {
     setState((s) => ({
       ...s,
       current: { ...s.current, freeFormAdditions: reordered },
     }));
-  }
+  }, []);
+
+  const resetItemEditor = useCallback(() => {
+    setItemEditor(initItemEditor());
+    setActiveProfileId(undefined);
+  }, [state.addons]);
 
   function addFreeFormAddition() {
     const newAddition: FreeFormAddition = {
@@ -503,7 +769,13 @@ export default function App() {
     }));
   }
 
-  function removeFreeFormAddition(id: string) {
+  async function removeFreeFormAddition(id: string) {
+    const row = state.current.freeFormAdditions.find((a) => a.id === id);
+    const label = (row?.name ?? "").trim() || "שורה זו";
+    const confirmed = await confirmDestructive(
+      `האם אתה בטוח שברצונך למחוק את "${label}"?`
+    );
+    if (!confirmed) return;
     setState((s) => ({
       ...s,
       current: {
@@ -521,18 +793,19 @@ export default function App() {
   function startNewEmptyQuote() {
     setState((s) => {
       const { nextState } = saveQuoteToState(s);
-      const defaultNotes =
-        nextState.notesPresets.length > 0 ? nextState.notesPresets[0].text : "";
       const emptyCurrent = {
         customerName: "",
         customerPhone: "",
         customerEmail: "",
         customerNotes: "",
         title: "הצעת מחיר",
+        documentType: "quote" as DocumentType,
+        documentNumber: undefined as number | undefined,
         items: [] as LineItem[],
         freeFormAdditions: [] as FreeFormAddition[],
-        notes: defaultNotes,
+        notes: "",
         taxPercentText: "18",
+        showTotals: true,
       };
       return {
         ...nextState,
@@ -595,13 +868,17 @@ export default function App() {
       current: {
         ...s.current,
         customerName: customer.name,
-        customerPhone: customer.phone ?? "",
-        customerEmail: customer.email ?? "",
+        customerPhone: q.customerPhone ?? customer.phone ?? "",
+        customerEmail: q.customerEmail ?? customer.email ?? "",
         customerNotes: customer.notes ?? "",
         items: q.items.map((it) => ({ ...it, id: uuid() })), // clone
-        title: q.title,
+        title: q.title || documentTypeLabel(q.documentType),
+        documentType: normalizeDocumentType(q.documentType),
+        documentNumber: q.documentNumber,
+        freeFormAdditions: (q.freeFormAdditions ?? []).map((add) => ({ ...add, id: uuid() })),
         taxPercentText: String(q.taxPercent ?? "18"),
-        notes: s.current.notes,
+        notes: q.notes ?? "",
+        showTotals: q.showTotals !== false,
       },
     }));
     clearCurrentForm();
@@ -611,28 +888,56 @@ export default function App() {
     const customer = state.customers.find((c) => c.id === customerId);
     const name = customer?.name ? ` "${customer.name}"` : "";
     const message = `האם אתה בטוח שברצונך למחוק את הלקוח${name}? פעולה זו תמחק גם את כל ההצעות השמורות של הלקוח.`;
-    let confirmed = false;
-    if (isTauri()) {
-      try {
-        const dialogModule = await import("@tauri-apps/plugin-dialog");
-        confirmed = await dialogModule.confirm(message, {
-          title: "אישור מחיקה",
-          kind: "warning",
-          okLabel: "כן, מחק",
-          cancelLabel: "ביטול",
-        });
-      } catch {
-        confirmed = window.confirm(message);
-      }
-    } else {
-      confirmed = window.confirm(message);
-    }
+    const confirmed = await confirmDestructive(message);
     if (!confirmed) return;
     setState((s) => ({
       ...s,
       customers: s.customers.filter((c) => c.id !== customerId),
       quotes: s.quotes.filter((q) => q.customerId !== customerId),
     }));
+  }
+
+  function duplicateCustomer(customerId: string) {
+    const quoteCount = state.quotes.filter((q) => q.customerId === customerId).length;
+    setState((s) => {
+      const src = s.customers.find((c) => c.id === customerId);
+      if (!src) return s;
+      const created: Customer = {
+        id: uuid(),
+        name: makeDuplicateCustomerName(s, src.name),
+        phone: src.phone,
+        email: src.email,
+        notes: src.notes,
+        createdAt: Date.now(),
+      };
+      let nextNum =
+        typeof s.nextPaymentRequestNumber === "number" && s.nextPaymentRequestNumber > 0
+          ? Math.floor(s.nextPaymentRequestNumber)
+          : 1;
+      const clonedQuotes = s.quotes
+        .filter((q) => q.customerId === src.id)
+        .map((q) => {
+          const documentType = normalizeDocumentType(q.documentType);
+          if (documentType === "payment_request") {
+            const assigned = nextNum;
+            nextNum += 1;
+            return cloneQuoteForNewCustomer(q, created.id, { documentNumber: assigned });
+          }
+          return cloneQuoteForNewCustomer(q, created.id);
+        });
+      return {
+        ...s,
+        customers: [...s.customers, created],
+        quotes: [...s.quotes, ...clonedQuotes],
+        nextPaymentRequestNumber: nextNum,
+      };
+    });
+    showToast(
+      quoteCount > 0
+        ? "הלקוח וההצעות השמורות שוכפלו"
+        : "הלקוח שוכפל (לא נמצאו הצעות שמורות ללקוח המקורי)",
+      "success"
+    );
   }
 
   // ======== PDF EXPORT =========
@@ -648,7 +953,7 @@ export default function App() {
 
     try {
       // Save the current quote to the system behind the scenes before exporting
-      const { nextState, error: saveError } = saveQuoteToState(state);
+      const { nextState, quote, quoteUnchanged, error: saveError } = saveQuoteToState(state);
       if (saveError) {
         showToast(saveError, "error");
         return;
@@ -656,7 +961,9 @@ export default function App() {
       setState(nextState);
 
       const result = await exportQuotePdf({
-        title: nextState.current.title || "הצעת מחיר",
+        title: nextState.current.title || documentTypeLabel(nextState.current.documentType),
+        documentType: nextState.current.documentType,
+        documentNumber: nextState.current.documentNumber,
         customerName: nextState.current.customerName,
         customerPhone: nextState.current.customerPhone,
         customerEmail: nextState.current.customerEmail,
@@ -666,6 +973,9 @@ export default function App() {
         freeFormAdditions: nextState.current.freeFormAdditions,
         pdfSaveFolder: nextState.pdfSaveFolder,
         dimensionUnit: nextState.dimensionUnit ?? "cm",
+        showTotals: nextState.current.showTotals,
+        pdfDateMs: quote?.date,
+        skipWriteIfUnchanged: quoteUnchanged === true,
       });
 
       if (result.success === false) {
@@ -680,8 +990,58 @@ export default function App() {
     }
   };
 
+  const handlePrintPdf = async () => {
+    if (!state.current.customerName.trim()) {
+      showToast("אנא הזן/י שם לקוח לפני הדפסה", "error");
+      return;
+    }
+    if (!state.current.items.length && !state.current.freeFormAdditions.length) {
+      showToast("ההצעה ריקה. הוסף/י פריטים לפני הדפסה.", "error");
+      return;
+    }
+
+    try {
+      const { nextState, quote, error: saveError } = saveQuoteToState(state);
+      if (saveError) {
+        showToast(saveError, "error");
+        return;
+      }
+      setState(nextState);
+
+      const result = await printQuotePdf({
+        title: nextState.current.title || documentTypeLabel(nextState.current.documentType),
+        documentType: nextState.current.documentType,
+        documentNumber: nextState.current.documentNumber,
+        customerName: nextState.current.customerName,
+        customerPhone: nextState.current.customerPhone,
+        customerEmail: nextState.current.customerEmail,
+        notes: nextState.current.notes,
+        taxPercentText: nextState.current.taxPercentText ?? "18",
+        items: nextState.current.items,
+        freeFormAdditions: nextState.current.freeFormAdditions,
+        pdfSaveFolder: nextState.pdfSaveFolder,
+        dimensionUnit: nextState.dimensionUnit ?? "cm",
+        showTotals: nextState.current.showTotals,
+        pdfDateMs: quote?.date,
+      });
+
+      if (result.success === false) {
+        showToast(result.error, "error");
+        return;
+      }
+
+      showToast("ה-PDF נפתח — ניתן להדפיס ולבחור מדפסת מהתפריט.", "success");
+    } catch (err: any) {
+      const msg = err?.message || String(err) || "שגיאה בהדפסת PDF";
+      showToast(msg, "error");
+    }
+  };
+
   const handleOpenPdfFolder = async () => {
-    const result = await openPdfSaveFolder(state.pdfSaveFolder);
+    const result = await openPdfSaveFolder(
+      state.pdfSaveFolder,
+      state.current.documentType
+    );
     if (result.success) {
       showToast("התיקייה נפתחה", "success");
     } else {
@@ -822,6 +1182,31 @@ export default function App() {
     }));
     return id;
   }
+
+  /** Update an existing profile from the quote page profile popup; keeps row labels in sync by profile id. */
+  function updateProfileQuick(id: string, name: string, unitPrice: number) {
+    const trimmedName = name.trim() || `פרופיל חדש`;
+    const price = parseLooseNumber(String(unitPrice)) || 0;
+    setState((s) => ({
+      ...s,
+      profiles: s.profiles.map((p) =>
+        p.id === id ? { ...p, name: trimmedName, unitPrice: price } : p
+      ),
+      current: {
+        ...s.current,
+        items: s.current.items.map((it) =>
+          it.profileId === id ? { ...it, profileName: trimmedName } : it
+        ),
+      },
+    }));
+    if (activeProfileId === id) {
+      setItemEditor((e) => ({
+        ...e,
+        profileName: trimmedName,
+        unitPrice: String(price),
+      }));
+    }
+  }
   function editProfile(p: Profile) {
     setAddonDraft({ name: "", price: "" }); // exit addon edit mode
     setProfileDraft({ id: p.id, name: p.name, unitPrice: String(p.unitPrice) });
@@ -843,10 +1228,16 @@ export default function App() {
     }));
     setProfileDraft({ name: "", unitPrice: "" });
   }
-  function deleteProfile(id: string) {
+  async function deleteProfile(id: string) {
+    const p = state.profiles.find((x) => x.id === id);
+    const label = p?.name ? ` "${p.name}"` : "";
+    const confirmed = await confirmDestructive(
+      `האם אתה בטוח שברצונך למחוק את הפרופיל${label}?`
+    );
+    if (!confirmed) return;
     setState((s) => ({
       ...s,
-      profiles: s.profiles.filter((p) => p.id !== id),
+      profiles: s.profiles.filter((x) => x.id !== id),
     }));
     if (activeProfileId === id) setActiveProfileId(undefined);
   }
@@ -884,10 +1275,16 @@ export default function App() {
     setAddonDraft({ name: "", price: "" });
   }
 
-  function deleteAddon(id: string) {
+  async function deleteAddon(id: string) {
+    const a = state.addons.find((x) => x.id === id);
+    const label = a?.name ? ` "${a.name}"` : "";
+    const confirmed = await confirmDestructive(
+      `האם אתה בטוח שברצונך למחוק את התוספת${label}?`
+    );
+    if (!confirmed) return;
     setState((s) => ({
       ...s,
-      addons: s.addons.filter((a) => a.id !== id),
+      addons: s.addons.filter((x) => x.id !== id),
     }));
   }
 
@@ -968,43 +1365,6 @@ export default function App() {
     showToast("תיקיית שמירה אופסה - יישמר בשולחן העבודה", "info");
   }
 
-  /** ======= Settings: Notes presets (הערות למסמך) ======= */
-  const [notesPresetDraft, setNotesPresetDraft] = useState<{
-    id?: string;
-    label: string;
-    text: string;
-  }>({ label: "", text: "" });
-
-  function addNotesPreset() {
-    const label = notesPresetDraft.label.trim() || "הערה חדשה";
-    const text = notesPresetDraft.text.trim() || "";
-    setState((s) => ({
-      ...s,
-      notesPresets: [...s.notesPresets, { id: uuid(), label, text }],
-    }));
-    setNotesPresetDraft({ label: "", text: "" });
-  }
-
-  function updateNotesPreset(id: string, updated: { label: string; text: string }) {
-    setState((s) => ({
-      ...s,
-      notesPresets: s.notesPresets.map((p) =>
-        p.id === id
-          ? { ...p, label: updated.label.trim() || p.label, text: updated.text }
-          : p
-      ),
-    }));
-    setNotesPresetDraft({ label: "", text: "" });
-  }
-
-  function deleteNotesPreset(id: string) {
-    setState((s) => ({
-      ...s,
-      notesPresets: s.notesPresets.filter((p) => p.id !== id),
-    }));
-    if (notesPresetDraft.id === id) setNotesPresetDraft({ label: "", text: "" });
-  }
-
   /** ======= UI ========= */
   return (
     <div className="container-app">
@@ -1016,10 +1376,16 @@ export default function App() {
               א
             </div>
             <h1 className="text-2xl sm:text-3xl font-semibold min-w-0 break-words">
-              הצעת מחיר — אלום סמעאן סאמי
+              אלום סמעאן סאמי
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              className="hidden sm:inline-flex px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
+              onClick={startNewEmptyQuote}
+            >
+              הצעה חדשה
+            </button>
             <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
               <button
                 className={`px-3 py-1.5 rounded-lg text-sm ${
@@ -1058,28 +1424,18 @@ export default function App() {
               <Settings className="w-4 h-4 shrink-0" aria-hidden />
               <span>הגדרות</span>
             </button>
-            {state.ui.tab === "quote" && (
-              <button
-                className="hidden sm:inline-flex px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
-                onClick={startNewEmptyQuote}
-              >
-                הצעה חדשה
-              </button>
-            )}
           </div>
         </header>
 
         {/* "הצעה חדשה" button for mobile */}
-        {state.ui.tab === "quote" && (
-          <div className="sm:hidden">
-            <button
-              className="w-full rounded-lg bg-emerald-600 text-white text-sm py-2 mb-1"
-              onClick={startNewEmptyQuote}
-            >
-              הצעה חדשה
-            </button>
-          </div>
-        )}
+        <div className="sm:hidden">
+          <button
+            className="w-full rounded-lg bg-emerald-600 text-white text-sm py-2 mb-1"
+            onClick={startNewEmptyQuote}
+          >
+            הצעה חדשה
+          </button>
+        </div>
 
         {/* Pages */}
         {state.ui.tab === "quote" ? (
@@ -1092,10 +1448,7 @@ export default function App() {
             setActiveProfileId={setActiveProfileId}
             openProfilesSettings={openProfilesSettings}
             onAddItem={() => addItem(itemEditor)}
-            onResetItemEditor={() => {
-              setItemEditor(initItemEditor());
-              setActiveProfileId(undefined);
-            }}
+            onResetItemEditor={resetItemEditor}
             onRemoveItem={removeItem}
             onEditItem={editItem}
             onUpdateItem={updateItem}
@@ -1106,21 +1459,23 @@ export default function App() {
             onRemoveFreeFormAddition={removeFreeFormAddition}
             onReorderFreeFormAdditions={reorderFreeFormAdditions}
             onExportPdf={handleExportPdf}
+            onPrintPdf={handlePrintPdf}
             showPdfFolderControl={isTauri()}
             pdfSaveFolder={state.pdfSaveFolder}
             onSelectPdfFolder={selectPdfSaveFolder}
             onOpenPdfFolder={handleOpenPdfFolder}
             dimensionUnit={state.dimensionUnit ?? "cm"}
             onAddProfileQuick={addProfileQuick}
+            onUpdateProfileQuick={updateProfileQuick}
           />
         ) : (
           <CustomersPage
             customers={state.customers}
             quotes={state.quotes}
             onOpenLast={openLastQuoteForCustomer}
-            onCreateNewOrder={startNewEmptyQuote}
             onOpenPdfFolder={isTauri() ? handleOpenPdfFolder : undefined}
             onDeleteCustomer={deleteCustomer}
+            onDuplicateCustomer={duplicateCustomer}
           />
         )}
 
@@ -1205,83 +1560,6 @@ export default function App() {
                     />
                     <span>מ״מ (מילימטרים)</span>
                   </label>
-                </div>
-              </div>
-
-              {/* Notes presets – default הערות למסמך options */}
-              <div className="border rounded-lg p-4 bg-amber-50/80 border-amber-200">
-                <div className="text-base font-semibold text-slate-800 mb-2">
-                  ברירות מחדל להערות למסמך
-                </div>
-                <div className="text-sm text-slate-600 mb-3">
-                  הוסף הערות מוכנות לבחירה. בעת פתיחת הצעה חדשה יוטמע ההערה הראשונה אוטומטית; ניתן גם לבחור הערה מהרשימה בשדה &quot;הערות למסמך&quot; בהצעה.
-                </div>
-                <div className="space-y-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <SettingsInput
-                      label="כותרת (לבחירה מהרשימה)"
-                      value={notesPresetDraft.label}
-                      onChange={(v) =>
-                        setNotesPresetDraft((d) => ({ ...d, label: v }))
-                      }
-                    />
-                    <div className="sm:col-span-2">
-                      <label className="grid gap-1.5 w-full">
-                        <span className="text-sm text-slate-700">טקסט ההערה</span>
-                        <textarea
-                          className="w-full rounded-md bg-white border border-slate-300 px-3 py-2 min-h-[80px]"
-                          value={notesPresetDraft.text}
-                          onChange={(e) =>
-                            setNotesPresetDraft((d) => ({ ...d, text: e.target.value }))
-                          }
-                          placeholder="תשלום בתוך 14 יום..."
-                          rows={3}
-                        />
-                      </label>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="px-4 py-2 rounded-lg bg-sky-500 text-white text-sm hover:opacity-95"
-                      onClick={addNotesPreset}
-                    >
-                      הוסף ברירת מחדל
-                    </button>
-                  </div>
-                  {state.notesPresets.length > 0 && (
-                    <div className="border rounded-lg overflow-hidden bg-white">
-                      <div className="text-xs font-medium text-slate-500 px-3 py-2 border-b bg-slate-50">
-                        הרשימה (הראשונה תוטמע בהצעה חדשה)
-                      </div>
-                      <ul className="divide-y max-h-48 overflow-y-auto">
-                        {state.notesPresets.map((p) => (
-                          <li
-                            key={p.id}
-                            className="px-3 py-2 flex flex-wrap items-start justify-between gap-2"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <span className="font-medium text-slate-800">
-                                {p.label || "(ללא כותרת)"}
-                              </span>
-                              {p.text && (
-                                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">
-                                  {p.text.replace(/\n/g, " ")}
-                                </p>
-                              )}
-                            </div>
-                            <button
-                              type="button"
-                              className="px-2 py-1 rounded-md bg-red-100 text-red-700 text-xs hover:bg-red-200"
-                              onClick={() => deleteNotesPreset(p.id)}
-                            >
-                              מחק
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
                 </div>
               </div>
 

@@ -1,7 +1,7 @@
 // FILE: src/QuotePage.tsx
 import React, { useMemo } from "react";
-import { Settings } from "lucide-react";
-import { AppState, LineItem, FreeFormAddition } from "./types";
+import { Pencil, Settings } from "lucide-react";
+import { AppState, LineItem, FreeFormAddition, DocumentType, DOCUMENT_TYPE_LABELS } from "./types";
 import {
   Select,
   SelectContent,
@@ -34,6 +34,41 @@ function parseLooseNumber(s: string): number {
   return isFinite(n) ? n : 0;
 }
 
+/** Same totals logic as App.addItem — used when saving an edited line from the add-item modal. */
+function buildLineItemFromItemEditor(draft: LineItem, id: string): LineItem {
+  const widthCm = draft.widthCm ?? "";
+  const heightCm = draft.heightCm ?? "";
+  const qtyText = draft.qty ?? "";
+  const unitPriceText = draft.unitPrice ?? "0";
+  const manualUnitPriceText = (draft.manualUnitPrice ?? "").trim();
+  const w = parseLooseNumber(widthCm);
+  const h = parseLooseNumber(heightCm);
+  const qty = Math.max(0, parseLooseNumber(qtyText));
+  const area = (w * h) / 10000;
+  const addonsPerItem = (draft.addons ?? []).reduce(
+    (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
+    0
+  );
+  const perItemPrice = manualUnitPriceText
+    ? parseLooseNumber(manualUnitPriceText) + addonsPerItem
+    : parseLooseNumber(unitPriceText) * area + addonsPerItem;
+  const subtotal = perItemPrice * qty;
+  return {
+    id,
+    widthCm,
+    heightCm,
+    qty: qtyText,
+    profileId: draft.profileId,
+    profileName: draft.profileName,
+    unitPrice: unitPriceText,
+    manualUnitPrice: manualUnitPriceText || undefined,
+    location: draft.location ?? "",
+    details: draft.details ?? "",
+    addons: (draft.addons ?? []).map((a) => ({ ...a })),
+    subtotal,
+  };
+}
+
 type QuotePageProps = {
   state: AppState;
   itemEditor: LineItem;
@@ -57,6 +92,8 @@ type QuotePageProps = {
   onRemoveFreeFormAddition: (id: string) => void;
   onReorderFreeFormAdditions: (reordered: FreeFormAddition[]) => void;
   onExportPdf: () => void;
+  /** Open PDF in a viewer for printing / printer selection */
+  onPrintPdf?: () => void;
   /** When true, show PDF save folder control beside export button (Tauri only) */
   showPdfFolderControl?: boolean;
   pdfSaveFolder?: string;
@@ -64,7 +101,8 @@ type QuotePageProps = {
   /** Open the folder where PDFs are saved (Tauri only) */
   onOpenPdfFolder?: () => void;
   dimensionUnit?: "cm" | "mm";
-  onAddProfileQuick?: (name: string, unitPrice: number) => void;
+  onAddProfileQuick?: (name: string, unitPrice: number) => string;
+  onUpdateProfileQuick?: (id: string, name: string, unitPrice: number) => void;
 };
 
 /** Convert stored cm to display value (cm or mm) */
@@ -96,19 +134,25 @@ const QuotePage: React.FC<QuotePageProps> = ({
   onRemoveFreeFormAddition,
   onReorderFreeFormAdditions,
   onExportPdf,
+  onPrintPdf,
   showPdfFolderControl,
   pdfSaveFolder,
   onSelectPdfFolder,
   onOpenPdfFolder,
   dimensionUnit = "cm",
   onAddProfileQuick,
+  onUpdateProfileQuick,
 }) => {
   const [editingItemId, setEditingItemId] = React.useState<string | null>(null);
   const [showAddProfileModal, setShowAddProfileModal] = React.useState(false);
+  /** When set, the profile popup is editing this existing profile; when null, it is add-new mode. */
+  const [profileModalEditId, setProfileModalEditId] = React.useState<string | null>(null);
   const [addProfileDraft, setAddProfileDraft] = React.useState({ name: "", unitPrice: "" });
   const [editDraft, setEditDraft] = React.useState<LineItem | null>(null);
   const [editActiveProfileId, setEditActiveProfileId] = React.useState<string | undefined>(undefined);
   const [showAddItemModal, setShowAddItemModal] = React.useState(false);
+  /** When set, the add-item calculator modal is editing this existing line instead of adding a new one. */
+  const [addItemModalEditingId, setAddItemModalEditingId] = React.useState<string | null>(null);
   const [addItemModalContentEl, setAddItemModalContentEl] = React.useState<HTMLDivElement | null>(null);
   const [editItemModalContentEl, setEditItemModalContentEl] = React.useState<HTMLDivElement | null>(null);
   const [showFreeFormInput, setShowFreeFormInput] = React.useState(false);
@@ -134,6 +178,50 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const freeFormRef = React.useRef(state.current.freeFormAdditions);
   itemsRef.current = state.current.items;
   freeFormRef.current = state.current.freeFormAdditions;
+
+  function closeProfileModal() {
+    setShowAddProfileModal(false);
+    setProfileModalEditId(null);
+    setAddProfileDraft({ name: "", unitPrice: "" });
+  }
+
+  function commitProfileModal() {
+    const name = addProfileDraft.name.trim() || "פרופיל חדש";
+    const unitPrice = parseLooseNumber(addProfileDraft.unitPrice) || 0;
+    if (profileModalEditId && onUpdateProfileQuick) {
+      onUpdateProfileQuick(profileModalEditId, name, unitPrice);
+    } else if (onAddProfileQuick) {
+      const newId = onAddProfileQuick(name, unitPrice);
+      if (editingItemId) {
+        setEditActiveProfileId(newId);
+        setEditDraft((d) =>
+          d
+            ? {
+                ...d,
+                profileId: newId,
+                profileName: name.trim() || "פרופיל חדש",
+                unitPrice: String(unitPrice),
+              }
+            : d
+        );
+      }
+    }
+    closeProfileModal();
+  }
+
+  /** Open the full item calculator (same as + הוסף פריט) with this line’s data. */
+  function openExistingLineInAddItemModal(itemId: string) {
+    onEditItem(itemId);
+    setAddItemModalEditingId(itemId);
+    setShowAddItemModal(true);
+  }
+
+  function closeAddItemModal() {
+    setShowAddItemModal(false);
+    setAddItemModalEditingId(null);
+    closeProfileModal();
+    onResetItemEditor?.();
+  }
 
   React.useEffect(() => {
     if (!dragState) return;
@@ -175,18 +263,18 @@ const QuotePage: React.FC<QuotePageProps> = ({
   }, [dragState, updateCurrent, onReorderFreeFormAdditions]);
 
   React.useEffect(() => {
-    if (showAddItemModal) onResetItemEditor?.();
-  }, [showAddItemModal]);
+    if (showAddItemModal && !addItemModalEditingId) onResetItemEditor?.();
+  }, [showAddItemModal, addItemModalEditingId, onResetItemEditor]);
 
+  // Only when the edited row changes — not on every items save — avoids a feedback loop with the auto-save effect below.
   React.useEffect(() => {
-    if (editingItemId) {
-      const item = state.current.items.find((it) => it.id === editingItemId);
-      if (item) {
-        setEditDraft({ ...item });
-        setEditActiveProfileId(item.profileId);
-      }
+    if (!editingItemId) return;
+    const item = state.current.items.find((it) => it.id === editingItemId);
+    if (item) {
+      setEditDraft({ ...item });
+      setEditActiveProfileId(item.profileId);
     }
-  }, [editingItemId, state.current.items]);
+  }, [editingItemId]);
 
   React.useEffect(() => {
     if (editDraft && editActiveProfileId) {
@@ -335,6 +423,46 @@ const QuotePage: React.FC<QuotePageProps> = ({
           {dragState.label} — גרור לסידור
         </div>
       )}
+      {/* Document type */}
+      <section className="card p-4 w-full">
+        <h2 className="text-xl font-semibold mb-3">סוג מסמך</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+          <div className="grid gap-1.5">
+            <label className="text-sm font-medium text-slate-700">סוג הקובץ</label>
+            <Select
+              value={state.current.documentType ?? "quote"}
+              onValueChange={(v) =>
+                updateCurrent("documentType", (v === "payment_request" ? "payment_request" : "quote") as DocumentType)
+              }
+            >
+              <SelectTrigger className="w-full bg-white">
+                <SelectValue placeholder="בחר סוג מסמך" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="quote">{DOCUMENT_TYPE_LABELS.quote}</SelectItem>
+                <SelectItem value="payment_request">
+                  {DOCUMENT_TYPE_LABELS.payment_request}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {state.current.documentType === "payment_request" && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              {state.current.documentNumber != null && state.current.documentNumber > 0 ? (
+                <>
+                  מספר חשבון עסקה:{" "}
+                  <span className="font-semibold tabular-nums">
+                    {String(state.current.documentNumber).padStart(4, "0")}
+                  </span>
+                </>
+              ) : (
+                <>מספר רץ יוקצה אוטומטית בשמירה / ייצוא</>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* Customer inline form */}
       <section className="card p-4 w-full">
         <h2 className="text-xl font-semibold mb-3">פרטי לקוח</h2>
@@ -392,16 +520,20 @@ const QuotePage: React.FC<QuotePageProps> = ({
       </section>
 
       {/* Add profile standalone modal (only when add-item modal is not open) */}
-      {showAddProfileModal && onAddProfileQuick && !showAddItemModal && (
+      {showAddProfileModal &&
+        !showAddItemModal &&
+        (profileModalEditId ? onUpdateProfileQuick : onAddProfileQuick) && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowAddProfileModal(false)}
+          onClick={closeProfileModal}
         >
           <div
             className="bg-white rounded-lg shadow-xl max-w-sm w-full p-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-semibold mb-3">הוספת פרופיל</h3>
+            <h3 className="text-lg font-semibold mb-3">
+              {profileModalEditId ? "עריכת פרופיל" : "הוספת פרופיל"}
+            </h3>
             <div className="space-y-3">
               <LabeledInput
                 label="שם הפרופיל"
@@ -420,22 +552,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
               <button
                 type="button"
                 className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
-                onClick={() => setShowAddProfileModal(false)}
+                onClick={closeProfileModal}
               >
                 ביטול
               </button>
               <button
                 type="button"
                 className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
-                onClick={() => {
-                  const name = addProfileDraft.name.trim() || "פרופיל חדש";
-                  const unitPrice = parseLooseNumber(addProfileDraft.unitPrice) || 0;
-                  onAddProfileQuick(name, unitPrice);
-                  setShowAddProfileModal(false);
-                  setAddProfileDraft({ name: "", unitPrice: "" });
-                }}
+                onClick={commitProfileModal}
               >
-                הוסף ובחר
+                {profileModalEditId ? "שמור" : "הוסף ובחר"}
               </button>
             </div>
           </div>
@@ -446,10 +572,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
       {showAddItemModal && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto"
-          onClick={() => {
-            setShowAddItemModal(false);
-            setShowAddProfileModal(false);
-          }}
+          onClick={closeAddItemModal}
         >
           <div
             ref={(el) => el && setAddItemModalContentEl(el)}
@@ -458,7 +581,13 @@ const QuotePage: React.FC<QuotePageProps> = ({
           >
             <div className="p-4 border-b flex items-center justify-between sticky top-0 bg-white rounded-t-xl">
               <h2 className="text-xl font-semibold">
-                {showAddProfileModal ? "הוספת פרופיל — המשך הוספת פריט להצעה" : "מחשבון פריט — הוספת פריט להצעה"}
+                {showAddProfileModal
+                  ? profileModalEditId
+                    ? "עריכת פרופיל — המשך הוספת פריט להצעה"
+                    : "הוספת פרופיל — המשך הוספת פריט להצעה"
+                  : addItemModalEditingId
+                  ? "מחשבון פריט — עריכת פריט להצעה"
+                  : "מחשבון פריט — הוספת פריט להצעה"}
               </h2>
               <div className="flex items-center gap-2">
                 {!showAddProfileModal && (
@@ -476,8 +605,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
                   type="button"
                   className="text-slate-500 hover:text-slate-700 p-1"
                   onClick={() => {
-                    if (showAddProfileModal) setShowAddProfileModal(false);
-                    else setShowAddItemModal(false);
+                    if (showAddProfileModal) closeProfileModal();
+                    else closeAddItemModal();
                   }}
                   aria-label="סגירה"
                 >
@@ -486,9 +615,13 @@ const QuotePage: React.FC<QuotePageProps> = ({
               </div>
             </div>
             <div className="p-4 space-y-4">
-              {showAddProfileModal && onAddProfileQuick ? (
+              {showAddProfileModal && (onAddProfileQuick || onUpdateProfileQuick) ? (
                 <>
-                  <p className="text-sm text-slate-600">הוספת פרופיל חדש — לאחר ההוספה תוכל לבחור אותו בפרופיל ולהמשיך למלא את הפריט.</p>
+                  <p className="text-sm text-slate-600">
+                    {profileModalEditId
+                      ? "עריכת הפרופיל הנבחר — השינויים יחולו על כל השורות שמשתמשות בפרופיל זה."
+                      : "הוספת פרופיל חדש — לאחר ההוספה תוכל לבחור אותו בפרופיל ולהמשיך למלא את הפריט."}
+                  </p>
                   <div className="space-y-3">
                     <LabeledInput
                       label="שם הפרופיל"
@@ -507,25 +640,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     <button
                       type="button"
                       className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
-                      onClick={() => {
-                        setShowAddProfileModal(false);
-                        setAddProfileDraft({ name: "", unitPrice: "" });
-                      }}
+                      onClick={closeProfileModal}
                     >
                       חזרה למחשבון
                     </button>
                     <button
                       type="button"
                       className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
-                      onClick={() => {
-                        const name = addProfileDraft.name.trim() || "פרופיל חדש";
-                        const unitPrice = parseLooseNumber(addProfileDraft.unitPrice) || 0;
-                        onAddProfileQuick(name, unitPrice);
-                        setShowAddProfileModal(false);
-                        setAddProfileDraft({ name: "", unitPrice: "" });
-                      }}
+                      onClick={commitProfileModal}
                     >
-                      הוסף ובחר
+                      {profileModalEditId ? "שמור" : "הוסף ובחר"}
                     </button>
                   </div>
                 </>
@@ -572,11 +696,26 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 <label className="grid gap-1.5 w-full">
                   <span className="text-sm text-slate-700">פרופיל</span>
                   <Select
-                    value={showAddProfileModal ? "__add_profile__" : (activeProfileId ?? "__empty__")}
+                    value={
+                      showAddProfileModal && profileModalEditId
+                        ? "__edit_profile__"
+                        : showAddProfileModal
+                        ? "__add_profile__"
+                        : (activeProfileId ?? "__empty__")
+                    }
                     onValueChange={(id) => {
                       if (id === "__add_profile__") {
                         setShowAddProfileModal(true);
+                        setProfileModalEditId(null);
                         setAddProfileDraft({ name: "", unitPrice: "" });
+                      } else if (id === "__edit_profile__") {
+                        const pid = activeProfileId;
+                        if (!pid || !onUpdateProfileQuick) return;
+                        const p = state.profiles.find((x) => x.id === pid);
+                        if (!p) return;
+                        setProfileModalEditId(pid);
+                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice) });
+                        setShowAddProfileModal(true);
                       } else if (id === "__empty__") {
                         setActiveProfileId(undefined);
                       } else {
@@ -594,6 +733,9 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           {p.name}
                         </SelectItem>
                       ))}
+                      {activeProfileId && onUpdateProfileQuick && (
+                        <SelectItem value="__edit_profile__">✏️ ערוך פרופיל...</SelectItem>
+                      )}
                       {onAddProfileQuick && (
                         <SelectItem value="__add_profile__">➕ הוסף פרופיל...</SelectItem>
                       )}
@@ -676,16 +818,23 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 <button
                   className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
                   onClick={() => {
-                    onAddItem();
-                    setShowAddItemModal(false);
+                    if (addItemModalEditingId) {
+                      onUpdateItem(
+                        addItemModalEditingId,
+                        buildLineItemFromItemEditor(itemEditor, addItemModalEditingId)
+                      );
+                    } else {
+                      onAddItem();
+                    }
+                    closeAddItemModal();
                   }}
                 >
-                  הוסף להצעה
+                  {addItemModalEditingId ? "שמור שינויים" : "הוסף להצעה"}
                 </button>
                 <button
                   type="button"
                   className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
-                  onClick={() => setShowAddItemModal(false)}
+                  onClick={closeAddItemModal}
                 >
                   ביטול
                 </button>
@@ -700,7 +849,9 @@ const QuotePage: React.FC<QuotePageProps> = ({
       {/* Items Table + totals + save/export */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-          <h2 className="text-xl font-semibold">פריטי ההצעה</h2>
+          <h2 className="text-xl font-semibold">
+            {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
+          </h2>
           <span className="text-sm text-slate-600 hidden sm:inline">
             הטבלה נגללת אופקית במסכים קטנים
           </span>
@@ -710,7 +861,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
             <colgroup>
               <col style={{ width: "2.5rem" }} />
               <col style={{ width: "10rem" }} />
-              <col style={{ width: "5rem" }} />
+              <col style={{ width: "8rem" }} />
               <col style={{ width: "10rem" }} />
               <col style={{ width: "12rem" }} />
               <col style={{ width: "4.5rem" }} />
@@ -722,7 +873,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
               <tr className="border-b bg-slate-50">
                 <Th>מס׳</Th>
                 <Th className="td-wrap-col">פרופיל</Th>
-                <Th>{dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)"}</Th>
+                <Th className="td-nowrap-col">{dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)"}</Th>
                 <Th className="td-wrap-col">מיקום</Th>
                 <Th className="td-details-col">פרטים</Th>
                 <Th>מחיר ליח׳</Th>
@@ -757,6 +908,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     : area * parseLooseNumber(it.unitPrice) + addonsSum;
                   const qty = Math.max(0, parseLooseNumber(it.qty));
                   const total = perItem * qty;
+                  const totalWithVat = total * (1 + taxDecimal);
 
                   const addonsText = it.addons
                     .filter((a) => a.checked)
@@ -789,27 +941,30 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         </div>
                       </Td>
                       <Td className="td-wrap-col">
-                        {editingCell?.itemId === it.id && editingCell?.field === "profile" ? (
-                          <EditableCellInput
-                            value={editingValue}
-                            onChange={setEditingValue}
-                            onCommit={() => {
-                              onUpdateItem(it.id, { ...it, profileName: editingValue.trim() || undefined });
-                              setEditingCell(null);
-                              setEditingValue("");
-                            }}
-                            onCancel={() => { setEditingCell(null); setEditingValue(""); }}
-                          />
-                        ) : (
-                          <EditableCellButton
-                            onClick={() => { setEditingCell({ itemId: it.id, field: "profile" }); setEditingValue(it.profileName || ""); }}
-                            title="לחץ לעריכה"
+                        <div className="flex items-start justify-end gap-1 w-full min-w-0">
+                          <button
+                            type="button"
+                            className="text-right flex-1 min-w-0 hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 min-h-[1.5rem] break-words"
+                            onClick={() => openExistingLineInAddItemModal(it.id)}
+                            title="לחץ לעריכת פריט (אותו חלון כמו + הוסף פריט)"
                           >
-                            {it.profileName || ""}
-                          </EditableCellButton>
-                        )}
+                            {it.profileName || "\u00A0"}
+                          </button>
+                          <button
+                            type="button"
+                            className="shrink-0 mt-0.5 p-1 rounded-md text-sky-700 hover:bg-sky-100 border border-transparent hover:border-sky-200"
+                            title="עריכת פריט"
+                            aria-label="עריכת פריט"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openExistingLineInAddItemModal(it.id);
+                            }}
+                          >
+                            <Pencil className="w-4 h-4" aria-hidden />
+                          </button>
+                        </div>
                       </Td>
-                      <Td>
+                      <Td className="td-nowrap-col">
                         {editingCell?.itemId === it.id && editingCell?.field === "dims" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -957,7 +1112,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         )}
                       </Td>
                       <Td className="font-medium">
-                        {fmtCurrency.format(total)}
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span>{fmtCurrency.format(total)}</span>
+                          {!state.current.showTotals && (
+                            <span className="text-xs text-slate-500">
+                              סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
+                            </span>
+                          )}
+                        </div>
                       </Td>
                       <Td>
                         <button
@@ -980,7 +1142,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
           <button
             type="button"
             className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95 inline-flex items-center gap-2 text-sm font-medium"
-            onClick={() => setShowAddItemModal(true)}
+            onClick={() => {
+              setAddItemModalEditingId(null);
+              setShowAddItemModal(true);
+            }}
             aria-label="הוסף פריט"
           >
             <span className="text-lg leading-none">+</span>
@@ -1057,11 +1222,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
             </div>
           )}
           <div className="table-scroll">
-            <table className="table-inner-min w-full text-sm">
+            <table className="table-inner-min table-quote-items w-full text-sm">
               <thead>
                 <tr className="border-b bg-slate-50">
                   <Th>מס׳</Th>
-                  <Th>שם התוספת</Th>
+                  <Th className="td-wrap-col">שם התוספת</Th>
                   <Th>מחיר ליח׳</Th>
                   <Th>כמות</Th>
                   <Th>סה״כ</Th>
@@ -1083,6 +1248,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     const price = parseLooseNumber(add.price);
                     const qty = Math.max(0, parseLooseNumber(add.qty));
                     const total = price * qty;
+                    const totalWithVat = total * (1 + taxDecimal);
                     const isEditing = (f: "name" | "price" | "qty") =>
                       editingFreeFormCell?.id === add.id && editingFreeFormCell?.field === f;
                     const commitFreeForm = (field: "name" | "price" | "qty") => {
@@ -1112,7 +1278,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             <span>{idx + 1}</span>
                           </div>
                         </Td>
-                        <Td>
+                        <Td className="td-wrap-col">
                           {isEditing("name") ? (
                             <EditableCellInput
                               value={editingFreeFormValue}
@@ -1175,7 +1341,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           )}
                         </Td>
                         <Td className="font-medium">
-                          {fmtCurrency.format(total)}
+                          <div className="flex flex-col items-end gap-0.5">
+                            <span>{fmtCurrency.format(total)}</span>
+                            {!state.current.showTotals && (
+                              <span className="text-xs text-slate-500">
+                                סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
+                              </span>
+                            )}
+                          </div>
                         </Td>
                         <Td>
                           <button
@@ -1208,50 +1381,50 @@ const QuotePage: React.FC<QuotePageProps> = ({
           </div>
         </div>
 
-        {/* Totals row */}
-        <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <label className="text-sm">מע״מ (% או עשרוני):</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
-              value={state.current.taxPercentText}
-              onChange={(e) =>
-                updateCurrent("taxPercentText", e.target.value)
-              }
-            />
-          </div>
-          <div className="grid grid-cols-3 gap-3 text-sm">
-            <Stat label="מחיר" value={fmtCurrency.format(totalSubTotal)} />
-            <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
-            <Stat
-              label="סה״כ לתשלום"
-              value={fmtCurrency.format(grandTotal)}
-              highlight
-            />
+        {/* Totals row + toggle for calculating overall totals */}
+        <div className="mt-4 flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <label className="text-sm">מע״מ (% או עשרוני):</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
+                  value={state.current.taxPercentText}
+                  onChange={(e) =>
+                    updateCurrent("taxPercentText", e.target.value)
+                  }
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4"
+                  checked={state.current.showTotals}
+                  onChange={(e) =>
+                    updateCurrent("showTotals", e.target.checked)
+                  }
+                />
+                <span>חשב והצג סיכום כללי (מחיר, מע״מ, סה״כ)</span>
+              </label>
+            </div>
+            {state.current.showTotals && (
+              <div className="grid grid-cols-3 gap-3 text-sm">
+                <Stat label="מחיר" value={fmtCurrency.format(totalSubTotal)} />
+                <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
+                <Stat
+                  label="סה״כ לתשלום"
+                  value={fmtCurrency.format(grandTotal)}
+                  highlight
+                />
+              </div>
+            )}
           </div>
         </div>
 
         {/* Footer notes - moved above date */}
         <div className="mt-4">
-          {state.notesPresets && state.notesPresets.length > 0 && (
-            <div className="mb-2">
-              <span className="text-sm text-slate-600 mr-2">בחר ברירת מחדל:</span>
-              <div className="flex flex-wrap gap-2 mt-1">
-                {state.notesPresets.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    className="px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 text-sm hover:bg-slate-200"
-                    onClick={() => updateCurrent("notes", preset.text)}
-                  >
-                    {preset.label || preset.text.slice(0, 20) + (preset.text.length > 20 ? "…" : "")}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
           <LabeledInput
             label="הערות למסמך (יופיעו ב-PDF)"
             value={state.current.notes}
@@ -1261,7 +1434,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
           />
         </div>
 
-        {/* Final actions: export + PDF folder (when in Tauri) — saving is automatic; keep buttons on the right in RTL */}
+        {/* Final actions: export / print + PDF folder (when in Tauri) — saving is automatic; keep buttons on the right in RTL */}
         <div className="mt-4 flex flex-col gap-2">
           <div className="flex flex-wrap gap-2 items-center justify-start">
             <button
@@ -1270,6 +1443,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
             >
               ייצוא ל-PDF
             </button>
+            {onPrintPdf && (
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg bg-sky-600 text-white hover:opacity-95"
+                onClick={onPrintPdf}
+                title="פתיחת ה-PDF בצופה להדפסה ובחירת מדפסת"
+              >
+                הדפסה
+              </button>
+            )}
             {showPdfFolderControl && onSelectPdfFolder && (
               <>
                 <button
@@ -1313,6 +1496,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
             setEditingItemId(null);
             setEditDraft(null);
             setEditActiveProfileId(undefined);
+            closeProfileModal();
           }}
         >
           <div
@@ -1321,19 +1505,68 @@ const QuotePage: React.FC<QuotePageProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-4 border-b flex items-center justify-between">
-              <h3 className="text-lg font-semibold">עריכת פריט</h3>
+              <h3 className="text-lg font-semibold">
+                {showAddProfileModal
+                  ? profileModalEditId
+                    ? "עריכת פרופיל — עריכת פריט"
+                    : "הוספת פרופיל — עריכת פריט"
+                  : "עריכת פריט"}
+              </h3>
               <button
                 className="text-slate-500 hover:text-slate-700"
                 onClick={() => {
-                  setEditingItemId(null);
-                  setEditDraft(null);
-                  setEditActiveProfileId(undefined);
+                  if (showAddProfileModal) closeProfileModal();
+                  else {
+                    setEditingItemId(null);
+                    setEditDraft(null);
+                    setEditActiveProfileId(undefined);
+                  }
                 }}
               >
                 ✕
               </button>
             </div>
             <div className="p-4 space-y-4">
+              {showAddProfileModal && (onAddProfileQuick || onUpdateProfileQuick) ? (
+                <>
+                  <p className="text-sm text-slate-600">
+                    {profileModalEditId
+                      ? "עריכת הפרופיל הנבחר — השינויים יחולו על כל השורות שמשתמשות בפרופיל זה."
+                      : "הוספת פרופיל חדש — לאחר ההוספה הפרופיל ייבחר עבור פריט זה."}
+                  </p>
+                  <div className="space-y-3">
+                    <LabeledInput
+                      label="שם הפרופיל"
+                      placeholder="למשל 4300 זכוכית ורשת"
+                      value={addProfileDraft.name}
+                      onChange={(v) => setAddProfileDraft((d) => ({ ...d, name: v }))}
+                    />
+                    <LabeledInput
+                      label="מחיר למ״ר (ברירת מחדל)"
+                      value={addProfileDraft.unitPrice}
+                      onChange={(v) => setAddProfileDraft((d) => ({ ...d, unitPrice: v }))}
+                      inputMode="numeric"
+                    />
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                    <button
+                      type="button"
+                      className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
+                      onClick={closeProfileModal}
+                    >
+                      חזרה לעריכת פריט
+                    </button>
+                    <button
+                      type="button"
+                      className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95"
+                      onClick={commitProfileModal}
+                    >
+                      {profileModalEditId ? "שמור" : "הוסף ובחר"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+              <>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <LabeledInput
                   label={dimensionUnit === "mm" ? "רוחב (מ״מ)" : "רוחב (ס״מ)"}
@@ -1375,8 +1608,32 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 <label className="grid gap-1.5 w-full">
                   <span className="text-sm text-slate-700">פרופיל</span>
                   <Select
-                    value={editActiveProfileId ?? "__empty__"}
-                    onValueChange={(id) => setEditActiveProfileId(id === "__empty__" ? undefined : id)}
+                    value={
+                      showAddProfileModal && profileModalEditId
+                        ? "__edit_profile__"
+                        : showAddProfileModal
+                        ? "__add_profile__"
+                        : (editActiveProfileId ?? "__empty__")
+                    }
+                    onValueChange={(id) => {
+                      if (id === "__add_profile__") {
+                        setShowAddProfileModal(true);
+                        setProfileModalEditId(null);
+                        setAddProfileDraft({ name: "", unitPrice: "" });
+                      } else if (id === "__edit_profile__") {
+                        const pid = editActiveProfileId;
+                        if (!pid || !onUpdateProfileQuick) return;
+                        const p = state.profiles.find((x) => x.id === pid);
+                        if (!p) return;
+                        setProfileModalEditId(pid);
+                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice) });
+                        setShowAddProfileModal(true);
+                      } else if (id === "__empty__") {
+                        setEditActiveProfileId(undefined);
+                      } else {
+                        setEditActiveProfileId(id);
+                      }
+                    }}
                   >
                     <SelectTrigger className="w-full rounded-md bg-white border border-slate-300 px-3 py-2 text-sm">
                       <SelectValue placeholder="— בחר/י —" />
@@ -1388,6 +1645,12 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           {p.name}
                         </SelectItem>
                       ))}
+                      {editActiveProfileId && onUpdateProfileQuick && (
+                        <SelectItem value="__edit_profile__">✏️ ערוך פרופיל...</SelectItem>
+                      )}
+                      {onAddProfileQuick && (
+                        <SelectItem value="__add_profile__">➕ הוסף פרופיל...</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </label>
@@ -1457,7 +1720,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
                   ))}
                 </div>
               </div>
+              </>
+              )}
             </div>
+            {!showAddProfileModal && (
             <div className="p-4 border-t flex justify-end gap-2">
               <button
                 className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
@@ -1476,6 +1742,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 שמור שינויים
               </button>
             </div>
+            )}
           </div>
         </div>
       )}
@@ -1662,7 +1929,7 @@ function Stat({
 
 function Th({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <th className={`text-right px-3 py-2 text-slate-700 font-medium whitespace-nowrap ${className ?? ""}`}>
+    <th className={`text-center px-3 py-2 text-slate-700 font-medium whitespace-nowrap ${className ?? ""}`}>
       {children}
     </th>
   );
