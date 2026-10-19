@@ -1123,7 +1123,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       </Td>
                       <Td>
                         <button
-                          className="text-red-600 hover:underline text-xs"
+                          className="whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
                           onClick={() => onRemoveItem(it.id)}
                           aria-label="מחק פריט"
                           title="מחק"
@@ -1352,7 +1352,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         </Td>
                         <Td>
                           <button
-                            className="text-red-600 hover:underline text-xs"
+                            className="whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
                             onClick={() => onRemoveFreeFormAddition(add.id)}
                             aria-label="מחק תוספת"
                             title="מחק"

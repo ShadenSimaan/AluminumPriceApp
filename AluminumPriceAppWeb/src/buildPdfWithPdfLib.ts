@@ -429,16 +429,116 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
   drawLine();
 
   // Items table
+  const items = payload.items || [];
+  const additions = payload.freeFormAdditions || [];
+  const dimUnit = payload.dimensionUnit ?? "cm";
+  const taxRate = normalizeTax(parseNum(payload.taxPercentText));
+  const showTotalsBox = payload.showTotals !== false;
+
+  const rows = items.map((it: PdfLineItem) => {
+    const w = parseNum(it.widthCm);
+    const h = parseNum(it.heightCm);
+    const dims =
+      dimUnit === "mm" ? `${Math.round(w * 10)}×${Math.round(h * 10)}` : `${Math.round(w)}×${Math.round(h)}`;
+    const qty = Math.max(0, parseNum(it.qty));
+    const area = (w * h) / 10000;
+    const addonsSum = (it.addons || []).reduce((s, a) => s + (a.checked ? parseNum(a.price) : 0), 0);
+    const manual = (it.manualUnitPrice ?? "").trim();
+    const perItem = manual ? parseNum(manual) + addonsSum : area * parseNum(it.unitPrice) + addonsSum;
+    const lineTotal = perItem * qty;
+    const profileStr = it.profileName || "";
+    const locationStr = it.location || "";
+    const detailsStr = [it.details, (it.addons || []).filter((a) => a.checked).map((a) => `${a.name}`).join(" • ")]
+      .filter(Boolean)
+      .join(" — ");
+    return { dims, qty, perItem, lineTotal, profileStr, locationStr, detailsStr };
+  });
+
+  const BODY_SIZE = 12;
+  const HEADER_SIZE = 12;
+  const CELL_PAD = 10;
+  const tableWidth = right - MARGIN_X;
+  const dimsHeader = dimUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)";
+  const measure = (t: string, size = BODY_SIZE) => (t ? textWidth(hebrewFont, latinFont, size, t) : 0);
+  const longestWord = (t: string) => Math.max(0, ...t.split(/\s+/).map((word) => measure(word)));
+  const fitColumn = (header: string, values: string[]) =>
+    Math.ceil(Math.max(measure(header, HEADER_SIZE), ...values.map((v) => measure(v))) + CELL_PAD);
+
+  const numValues = [...rows.map((_, i) => String(i + 1)), ...additions.map((_, i) => String(items.length + i + 1))];
+  const unitPriceValues = [...rows.map((r) => formatNum(r.perItem)), ...additions.map((a) => formatNum(parseNum(a.price)))];
+  const qtyValues = [...rows.map((r) => formatNum(r.qty)), ...additions.map((a) => formatNum(Math.max(0, parseNum(a.qty))))];
+  const lineTotals = [
+    ...rows.map((r) => r.lineTotal),
+    ...additions.map((a) => parseNum(a.price) * Math.max(0, parseNum(a.qty))),
+  ];
+  // When the totals box is hidden each total also gets a wrapped "עם מע״מ ..." line; size for its amount part.
+  const totalValues = [
+    ...lineTotals.map((t) => formatNum(t) + " ₪"),
+    ...(showTotalsBox ? [] : lineTotals.map((t) => formatNum(t * (1 + taxRate)) + " ₪")),
+  ];
+
   const colW = {
-    num: 25,
-    profile: 78,
-    dims: 78,
-    location: 58,
-    details: 111,
-    unitPrice: 65,
-    qty: 30,
-    total: 70,
+    num: fitColumn("מס׳", numValues),
+    profile: 0,
+    dims: fitColumn(dimsHeader, rows.map((r) => r.dims)),
+    location: 0,
+    details: 0,
+    unitPrice: fitColumn("מחיר ליח׳", unitPriceValues),
+    qty: fitColumn("כמות", qtyValues),
+    total: fitColumn("סה״כ", totalValues),
   };
+
+  // Text columns share the remaining width: each gets at least its header / longest word, then the
+  // profile is widened toward one line (up to PROFILE_MAX_SHARE of the table), then the rest is shared.
+  const PROFILE_MAX_SHARE = 0.4;
+  const flexCols = [
+    { key: "profile" as const, header: "פרופיל", texts: rows.map((r) => r.profileStr) },
+    { key: "location" as const, header: "מיקום", texts: rows.map((r) => r.locationStr) },
+    {
+      key: "details" as const,
+      header: "פרטים",
+      texts: [...rows.map((r) => r.detailsStr), ...additions.map((a) => a.name || "")],
+    },
+  ].map((c) => {
+    const min = Math.ceil(Math.max(measure(c.header, HEADER_SIZE), ...c.texts.map(longestWord)) + CELL_PAD);
+    const natural = Math.ceil(Math.max(min, ...c.texts.map((t) => measure(t) + CELL_PAD)));
+    return { ...c, min, natural };
+  });
+  const fixedW = colW.num + colW.dims + colW.unitPrice + colW.qty + colW.total;
+  let remaining = tableWidth - fixedW;
+  flexCols.forEach((c) => {
+    colW[c.key] = c.min;
+    remaining -= c.min;
+  });
+  if (remaining > 0) {
+    const profileTarget = Math.max(colW.profile, Math.min(flexCols[0].natural, tableWidth * PROFILE_MAX_SHARE));
+    const add = Math.min(remaining, profileTarget - colW.profile);
+    colW.profile += add;
+    remaining -= add;
+  }
+  for (let pass = 0; pass < 4 && remaining > 0.5; pass++) {
+    const needy = flexCols.filter((c) => colW[c.key] < c.natural);
+    if (!needy.length) break;
+    let given = 0;
+    needy.forEach((c) => {
+      const add = Math.min(c.natural - colW[c.key], remaining / needy.length);
+      colW[c.key] += add;
+      given += add;
+    });
+    remaining -= given;
+  }
+  if (remaining > 0) {
+    colW.details += remaining * 0.5;
+    colW.profile += remaining * 0.5;
+  } else if (remaining < 0) {
+    // Content too wide even at minimums: shrink text columns proportionally.
+    const flexSum = colW.profile + colW.location + colW.details;
+    const scale = (flexSum + remaining) / flexSum;
+    colW.profile *= scale;
+    colW.location *= scale;
+    colW.details *= scale;
+  }
+
   const colRight = {
     num: right,
     profile: right - colW.num,
@@ -515,7 +615,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       hebrewFont,
       latinFont,
       11,
-      payload.dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)",
+      dimsHeader,
       dimsX,
       y - 14
     );
@@ -527,31 +627,10 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
 
   drawTableHeader();
 
-  const items = payload.items || [];
-  const additions = payload.freeFormAdditions || [];
-  const dimUnit = payload.dimensionUnit ?? "cm";
-  const taxRate = normalizeTax(parseNum(payload.taxPercentText));
-  const showTotalsBox = payload.showTotals !== false;
-
-  items.forEach((it: PdfLineItem, idx: number) => {
-    const w = parseNum(it.widthCm);
-    const h = parseNum(it.heightCm);
-    const dims =
-      dimUnit === "mm" ? `${Math.round(w * 10)}×${Math.round(h * 10)}` : `${Math.round(w)}×${Math.round(h)}`;
-    const qty = Math.max(0, parseNum(it.qty));
-    const area = (w * h) / 10000;
-    const addonsSum = (it.addons || []).reduce((s, a) => s + (a.checked ? parseNum(a.price) : 0), 0);
-    const manual = (it.manualUnitPrice ?? "").trim();
-    const perItem = manual ? parseNum(manual) + addonsSum : area * parseNum(it.unitPrice) + addonsSum;
-    const lineTotal = perItem * qty;
+  rows.forEach(({ dims, qty, perItem, lineTotal, profileStr, locationStr, detailsStr }, idx: number) => {
     const lineTotalWithVat = lineTotal * (1 + taxRate);
-    const profileStr = it.profileName || "";
-    const detailsStr = [it.details, (it.addons || []).filter((a) => a.checked).map((a) => `${a.name}`).join(" • ")]
-      .filter(Boolean)
-      .join(" — ");
-
     const profileLines = wrapText(hebrewFont, latinFont, 12, profileStr, colW.profile - 8);
-    const locationLines = wrapText(hebrewFont, latinFont, 12, it.location || "", colW.location - 8);
+    const locationLines = wrapText(hebrewFont, latinFont, 12, locationStr, colW.location - 8);
     const detailsLines = wrapText(hebrewFont, latinFont, 12, detailsStr, colW.details - 8);
     const unitPriceLines = wrapText(hebrewFont, latinFont, 12, formatNum(perItem), colW.unitPrice - 8);
     const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);

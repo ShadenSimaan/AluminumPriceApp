@@ -962,6 +962,14 @@ export async function revealPdfFile(savedPath: string): Promise<{ success: boole
   if (!filePath) return { success: false, error: "נתיב קובץ לא תקין" };
 
   try {
+    const opener = await import("@tauri-apps/plugin-opener");
+    await opener.revealItemInDir(filePath);
+    return { success: true };
+  } catch (revealErr: any) {
+    console.warn("⚠ revealItemInDir failed, trying explorer:", revealErr?.message || revealErr);
+  }
+
+  try {
     // Best UX on Windows: open Explorer with the file selected
     const shell = await import("@tauri-apps/plugin-shell");
     const { Command } = shell;
