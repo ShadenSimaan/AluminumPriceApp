@@ -115,19 +115,8 @@ h3 { font-size: 1.5rem; font-weight: 700; }    /* ~29px */
   white-space: normal;
   vertical-align: top;
 }
-.table-quote-items th.td-details-col,
-.table-quote-items td.td-details-col {
-  width: 12rem;
-  max-width: 12rem;
-}
-.table-quote-items th.td-wrap-col,
-.table-quote-items td.td-wrap-col {
-  max-width: 10rem;
-}
 .table-quote-items th.td-nowrap-col,
 .table-quote-items td.td-nowrap-col {
-  width: 8rem;
-  min-width: 8rem;
   white-space: nowrap;
   overflow: visible;
   word-break: normal;

@@ -114,6 +114,136 @@ function displayToCm(display: number, unit: "cm" | "mm"): number {
   return unit === "mm" ? display / 10 : display;
 }
 
+/** ===== Items table: column widths sized to their content (same idea as the PDF table) ===== */
+type ItemsColKey = "num" | "profile" | "dims" | "location" | "details" | "unitPrice" | "qty" | "total" | "actions";
+const ITEMS_COL_ORDER: ItemsColKey[] = ["num", "profile", "dims", "location", "details", "unitPrice", "qty", "total", "actions"];
+type ItemsColumnContent = Record<ItemsColKey, string[]> & { headers: Record<ItemsColKey, string> };
+
+// Sizes in rem, matching the Tailwind classes used by the cells
+const CELL_PAD_X_REM = 1.5; // px-3 on both sides of every cell
+const EDITABLE_BTN_PAD_REM = 0.5; // px-1 inside the full-width click-to-edit buttons
+const DRAG_HANDLE_GAP_REM = 0.5; // gap-2 between "⋮⋮" and the row number
+const PROFILE_EDIT_BTN_REM = 1.75; // pencil (w-4) + p-1 + gap-1 next to the profile name
+const DELETE_BTN_PAD_REM = 1.25; // px-2.5 on the delete button
+const PROFILE_MAX_SHARE = 0.4;
+const PROFILE_MIN_REM = 12; // on narrow windows keep the profile readable and scroll the table instead
+
+type ItemsTableMetrics = { fontFamily: string; rem: number };
+
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureTextPx(text: string, font: string): number {
+  if (!text) return 0;
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  if (!measureCtx) return text.length * 8;
+  measureCtx.font = font;
+  return measureCtx.measureText(text).width;
+}
+
+function computeItemsColumnWidths(
+  content: ItemsColumnContent,
+  available: number,
+  { fontFamily, rem }: ItemsTableMetrics
+): Record<ItemsColKey, number> {
+  const fontPx = 0.875 * rem; // text-sm
+  const cellFont = `600 ${fontPx}px ${fontFamily}`;
+  const headerFont = `500 ${fontPx}px ${fontFamily}`;
+  const cellPad = CELL_PAD_X_REM * rem;
+  const editPad = EDITABLE_BTN_PAD_REM * rem;
+  const m = (t: string, font = cellFont) => measureTextPx(t, font);
+  const longestWord = (t: string) => Math.max(0, ...t.split(/\s+/).map((w) => m(w)));
+  // +4px so sub-pixel rounding never pushes a value onto a second line
+  const headerW = (k: ItemsColKey) => m(content.headers[k], headerFont) + cellPad + 4;
+  const fit = (k: ItemsColKey, extra = 0) =>
+    Math.ceil(Math.max(headerW(k), ...content[k].map((v) => m(v) + cellPad + extra + 4)));
+
+  const widths: Record<ItemsColKey, number> = {
+    num: fit("num", m("⋮⋮") + DRAG_HANDLE_GAP_REM * rem),
+    profile: 0,
+    dims: fit("dims", editPad),
+    location: 0,
+    details: 0,
+    unitPrice: fit("unitPrice", editPad),
+    qty: fit("qty", editPad),
+    total: fit("total"),
+    actions: fit("actions", DELETE_BTN_PAD_REM * rem + 2),
+  };
+
+  // Text columns: at least header / longest word, then the profile is widened toward one line
+  // (up to PROFILE_MAX_SHARE of the table), then the rest is shared; never shrink below the minimum.
+  const flexCols = (["profile", "location", "details"] as const).map((k) => {
+    const extra = k === "profile" ? PROFILE_EDIT_BTN_REM * rem + 2 : editPad;
+    const texts = content[k];
+    const wordMin = Math.ceil(Math.max(headerW(k), ...texts.map((t) => longestWord(t) + cellPad + extra + 4)));
+    const natural = Math.ceil(Math.max(wordMin, ...texts.map((t) => m(t) + cellPad + extra + 4)));
+    const min = k === "profile" ? Math.max(wordMin, Math.min(natural, PROFILE_MIN_REM * rem)) : wordMin;
+    return { k, min, natural };
+  });
+  flexCols.forEach((c) => (widths[c.k] = c.min));
+  let remaining = available - ITEMS_COL_ORDER.reduce((s, k) => s + widths[k], 0);
+  if (remaining > 0) {
+    const profileTarget = Math.max(widths.profile, Math.min(flexCols[0].natural, available * PROFILE_MAX_SHARE));
+    const add = Math.min(remaining, profileTarget - widths.profile);
+    widths.profile += add;
+    remaining -= add;
+  }
+  for (let pass = 0; pass < 4 && remaining > 0.5; pass++) {
+    const needy = flexCols.filter((c) => widths[c.k] < c.natural);
+    if (!needy.length) break;
+    let given = 0;
+    needy.forEach((c) => {
+      const add = Math.min(c.natural - widths[c.k], remaining / needy.length);
+      widths[c.k] += add;
+      given += add;
+    });
+    remaining -= given;
+  }
+  if (remaining > 0) {
+    widths.details += remaining * 0.5;
+    widths.profile += remaining * 0.5;
+  }
+  return widths;
+}
+
+/** Tracks the table container width and font, and returns content-based column widths. */
+function useItemsColumnWidths(content: ItemsColumnContent) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [available, setAvailable] = React.useState(0);
+  const [metrics, setMetrics] = React.useState<ItemsTableMetrics>({ fontFamily: "sans-serif", rem: 16 });
+  const [fontsLoaded, setFontsLoaded] = React.useState(0);
+
+  React.useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      setAvailable(el.clientWidth);
+      // The root font size changes with the window size, so re-read it on every resize
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const fontFamily = getComputedStyle(el).fontFamily || "sans-serif";
+      setMetrics((prev) => (prev.rem === rem && prev.fontFamily === fontFamily ? prev : { fontFamily, rem }));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    let cancelled = false;
+    document.fonts?.ready.then(() => {
+      if (!cancelled) setFontsLoaded((n) => n + 1);
+    });
+    return () => {
+      cancelled = true;
+      ro.disconnect();
+    };
+  }, []);
+
+  const widths = useMemo(
+    () => computeItemsColumnWidths(content, available, metrics),
+    // fontsLoaded: re-measure once web fonts finish loading
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [content, available, metrics, fontsLoaded]
+  );
+  const totalWidth = ITEMS_COL_ORDER.reduce((s, k) => s + widths[k], 0);
+  return { containerRef, widths, totalWidth };
+}
+
 const QuotePage: React.FC<QuotePageProps> = ({
   state,
   itemEditor,
@@ -407,6 +537,58 @@ const QuotePage: React.FC<QuotePageProps> = ({
 
   const taxValue = totalSubTotal * taxDecimal;
   const grandTotal = totalSubTotal + taxValue;
+
+  const itemsColumnContent = useMemo<ItemsColumnContent>(() => {
+    const items = state.current.items;
+    const rows = items.map((it) => {
+      const w = parseLooseNumber(it.widthCm);
+      const h = parseLooseNumber(it.heightCm);
+      const addonsSum = it.addons.reduce((s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0), 0);
+      const manual = (it.manualUnitPrice ?? "").trim();
+      const perItem = manual
+        ? parseLooseNumber(manual) + addonsSum
+        : ((w * h) / 10000) * parseLooseNumber(it.unitPrice) + addonsSum;
+      const qty = Math.max(0, parseLooseNumber(it.qty));
+      const addonsText = it.addons
+        .filter((a) => a.checked)
+        .map((a) => `${a.name} (${fmtCurrency.format(parseLooseNumber(a.price))})`)
+        .join(" • ");
+      return {
+        dims:
+          dimensionUnit === "mm"
+            ? `${fmtNumber.format(Math.round(cmToDisplay(w, dimensionUnit)))}×${fmtNumber.format(Math.round(cmToDisplay(h, dimensionUnit)))}`
+            : `${fmtNumber.format(w)}×${fmtNumber.format(h)}`,
+        perItem,
+        qty,
+        profile: it.profileName || "",
+        location: it.location || "",
+        details: [it.details, addonsText].filter(Boolean).join(" — "),
+      };
+    });
+    return {
+      headers: {
+        num: "מס׳",
+        profile: "פרופיל",
+        dims: dimensionUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)",
+        location: "מיקום",
+        details: "פרטים",
+        unitPrice: "מחיר ליח׳",
+        qty: "כמות",
+        total: "סה״כ",
+        actions: "פעולות",
+      },
+      num: rows.map((_, i) => String(i + 1)),
+      profile: rows.map((r) => r.profile),
+      dims: rows.map((r) => r.dims),
+      location: rows.map((r) => r.location),
+      details: rows.map((r) => r.details),
+      unitPrice: rows.map((r) => fmtCurrency.format(r.perItem)),
+      qty: rows.map((r) => fmtNumber.format(r.qty)),
+      total: rows.map((r) => fmtCurrency.format(r.perItem * r.qty)),
+      actions: rows.length ? ["מחיקה"] : [],
+    };
+  }, [state.current.items, dimensionUnit]);
+  const itemsColumns = useItemsColumnWidths(itemsColumnContent);
 
   return (
     <section className="grid gap-4 min-w-0 w-full">
@@ -856,18 +1038,15 @@ const QuotePage: React.FC<QuotePageProps> = ({
             הטבלה נגללת אופקית במסכים קטנים
           </span>
         </div>
-        <div className="table-scroll">
-          <table className="table-inner-min table-quote-items w-full text-sm">
+        <div className="table-scroll" ref={itemsColumns.containerRef}>
+          <table
+            className="table-inner-min table-quote-items w-full text-sm"
+            style={{ minWidth: itemsColumns.totalWidth }}
+          >
             <colgroup>
-              <col style={{ width: "2.5rem" }} />
-              <col style={{ width: "9rem" }} />
-              <col style={{ width: "8rem" }} />
-              <col style={{ width: "7rem" }} />
-              <col style={{ width: "10rem" }} />
-              <col style={{ width: "7rem" }} />
-              <col style={{ width: "3.5rem" }} />
-              <col style={{ width: "7.5rem" }} />
-              <col style={{ width: "6rem" }} />
+              {ITEMS_COL_ORDER.map((k) => (
+                <col key={k} style={{ width: itemsColumns.widths[k] }} />
+              ))}
             </colgroup>
             <thead>
               <tr className="border-b bg-slate-50">
