@@ -860,14 +860,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
           <table className="table-inner-min table-quote-items w-full text-sm">
             <colgroup>
               <col style={{ width: "2.5rem" }} />
-              <col style={{ width: "10rem" }} />
+              <col style={{ width: "9rem" }} />
               <col style={{ width: "8rem" }} />
+              <col style={{ width: "7rem" }} />
               <col style={{ width: "10rem" }} />
-              <col style={{ width: "12rem" }} />
-              <col style={{ width: "4.5rem" }} />
-              <col style={{ width: "3rem" }} />
-              <col style={{ width: "4.5rem" }} />
+              <col style={{ width: "7rem" }} />
               <col style={{ width: "3.5rem" }} />
+              <col style={{ width: "7.5rem" }} />
+              <col style={{ width: "6rem" }} />
             </colgroup>
             <thead>
               <tr className="border-b bg-slate-50">
@@ -1050,7 +1050,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           </EditableCellButton>
                         )}
                       </Td>
-                      <Td>
+                      <Td className="td-keep-together">
                         {editingCell?.itemId === it.id && editingCell?.field === "unitPrice" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -1083,7 +1083,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           </EditableCellButton>
                         )}
                       </Td>
-                      <Td>
+                      <Td className="td-keep-together">
                         {editingCell?.itemId === it.id && editingCell?.field === "qty" ? (
                           <EditableCellInput
                             value={editingValue}
@@ -1111,19 +1111,19 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           </EditableCellButton>
                         )}
                       </Td>
-                      <Td className="font-medium">
+                      <Td className="font-medium td-keep-together">
                         <div className="flex flex-col items-end gap-0.5">
                           <span>{fmtCurrency.format(total)}</span>
                           {!state.current.showTotals && (
-                            <span className="text-xs text-slate-500">
+                            <span className="text-xs text-slate-500 whitespace-normal">
                               סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
                             </span>
                           )}
                         </div>
                       </Td>
-                      <Td>
+                      <Td className="td-keep-together">
                         <button
-                          className="whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
+                          className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
                           onClick={() => onRemoveItem(it.id)}
                           aria-label="מחק פריט"
                           title="מחק"
@@ -1298,7 +1298,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             </EditableCellButton>
                           )}
                         </Td>
-                        <Td>
+                        <Td className="td-keep-together">
                           {isEditing("price") ? (
                             <EditableCellInput
                               value={editingFreeFormValue}
@@ -1319,7 +1319,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             </EditableCellButton>
                           )}
                         </Td>
-                        <Td>
+                        <Td className="td-keep-together">
                           {isEditing("qty") ? (
                             <EditableCellInput
                               value={editingFreeFormValue}
@@ -1340,19 +1340,19 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             </EditableCellButton>
                           )}
                         </Td>
-                        <Td className="font-medium">
+                        <Td className="font-medium td-keep-together">
                           <div className="flex flex-col items-end gap-0.5">
                             <span>{fmtCurrency.format(total)}</span>
                             {!state.current.showTotals && (
-                              <span className="text-xs text-slate-500">
+                              <span className="text-xs text-slate-500 whitespace-normal">
                                 סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
                               </span>
                             )}
                           </div>
                         </Td>
-                        <Td>
+                        <Td className="td-keep-together">
                           <button
-                            className="whitespace-nowrap rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
+                            className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
                             onClick={() => onRemoveFreeFormAddition(add.id)}
                             aria-label="מחק תוספת"
                             title="מחק"
