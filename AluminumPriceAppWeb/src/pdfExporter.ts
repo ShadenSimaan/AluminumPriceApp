@@ -298,11 +298,13 @@ export interface PdfQuotePayload {
   dimensionUnit?: "cm" | "mm"; // display dimensions in cm or mm (data is stored in cm)
   /** When false, do not draw the overall totals box (מחיר/מע״מ/סה״כ) */
   showTotals?: boolean;
-  /** When true and the target PDF already exists, skip rewriting it (keeps file modified date). */
-  skipWriteIfUnchanged?: boolean;
+  /** True when the quote has not changed since it was last saved (shown in the "file exists" prompt). */
+  quoteUnchanged?: boolean;
 }
 
-export type PdfExportResult = { success: true; savedPath: string } | { success: false; error: string };
+export type PdfExportResult =
+  | { success: true; savedPath: string; reusedExisting?: boolean }
+  | { success: false; error: string };
 
 // --- small helpers ---
 
@@ -497,8 +499,9 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     payload.documentNumber
   );
 
-  // When nothing changed, reuse the existing PDF file (content date + file modified date stay the same).
-  if (payload.skipWriteIfUnchanged && isTauri()) {
+  // If this document's PDF already exists, let the user choose: save it again (replace) or open the existing file.
+  let replaceExisting = false;
+  if (isTauri()) {
     try {
       const fsModule = await import("@tauri-apps/plugin-fs");
       let savePath = await getPdfSavePath(
@@ -514,16 +517,29 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
         savePath = await pathModule.join(yearFolder, filename);
       }
       if (savePath && (await fsModule.exists(savePath))) {
-        console.log("Quote unchanged — reusing existing PDF:", savePath);
-        try {
-          await revealPdfFile(savePath);
-        } catch (revealErr: any) {
-          console.warn("Could not reveal existing PDF:", revealErr?.message || revealErr);
+        const dialogModule = await import("@tauri-apps/plugin-dialog");
+        const unchangedNote = payload.quoteUnchanged ? "לא בוצעו שינויים מאז השמירה האחרונה.\n\n" : "";
+        const resave = await dialogModule.ask(
+          `קובץ PDF למסמך זה כבר שמור:\n${filename}\n\n${unchangedNote}לשמור אותו מחדש? הקובץ הקיים יוחלף בגרסה הנוכחית.`,
+          {
+            title: "הקובץ כבר קיים",
+            kind: "info",
+            okLabel: "שמור מחדש (החלף)",
+            cancelLabel: "פתח את הקובץ הקיים",
+          }
+        );
+        if (!resave) {
+          try {
+            await revealPdfFile(savePath);
+          } catch (revealErr: any) {
+            console.warn("Could not reveal existing PDF:", revealErr?.message || revealErr);
+          }
+          return { success: true, savedPath: savePath, reusedExisting: true };
         }
-        return { success: true, savedPath: savePath };
+        replaceExisting = true;
       }
-    } catch (earlyReuseErr: any) {
-      console.warn("Early reuse check failed, will regenerate PDF:", earlyReuseErr?.message || earlyReuseErr);
+    } catch (existingCheckErr: any) {
+      console.warn("Existing PDF check failed, continuing with normal export:", existingCheckErr?.message || existingCheckErr);
     }
   }
 
@@ -612,8 +628,9 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
       // This ensures Tauri grants permission for the specific file path
       let finalSavePath = savePath;
       
-      // If using custom folder, try to use save dialog to get permission
-      if (payload.pdfSaveFolder && payload.pdfSaveFolder.trim()) {
+      // If using custom folder, try to use save dialog to get permission.
+      // Skipped when replacing: the user already confirmed, and Windows would ask to overwrite a second time.
+      if (payload.pdfSaveFolder && payload.pdfSaveFolder.trim() && !replaceExisting) {
         try {
           console.log("Using custom folder, attempting to get permission via save dialog...");
           const saveResult = await dialogModule.save({

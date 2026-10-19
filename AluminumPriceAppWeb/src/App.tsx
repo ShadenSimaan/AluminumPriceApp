@@ -975,7 +975,7 @@ export default function App() {
         dimensionUnit: nextState.dimensionUnit ?? "cm",
         showTotals: nextState.current.showTotals,
         pdfDateMs: quote?.date,
-        skipWriteIfUnchanged: quoteUnchanged === true,
+        quoteUnchanged: quoteUnchanged === true,
       });
 
       if (result.success === false) {
@@ -983,7 +983,12 @@ export default function App() {
         return;
       }
 
-      showToast("ה-PDF נשמר בהצלחה. התיקייה נפתחה עם הקובץ.", "success");
+      showToast(
+        result.reusedExisting
+          ? "נפתח הקובץ הקיים. התיקייה נפתחה עם הקובץ."
+          : "ה-PDF נשמר בהצלחה. התיקייה נפתחה עם הקובץ.",
+        "success"
+      );
     } catch (err: any) {
       const msg = err?.message || String(err) || "שגיאה ביצוא PDF";
       showToast(msg, "error");
