@@ -24,6 +24,10 @@
         { "path": "$HOME/**" }
       ]
     },
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "allow": [{ "path": "**" }]
+    },
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",
@@ -55,6 +59,11 @@
         {
           "name": "explorer",
           "cmd": "explorer",
+          "args": true
+        },
+        {
+          "name": "cmd",
+          "cmd": "cmd",
           "args": true
         }
       ]
