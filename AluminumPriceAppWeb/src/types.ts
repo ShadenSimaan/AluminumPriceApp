@@ -1,18 +1,25 @@
 // FILE: src/types.ts
+import type { RfqSettings, SupplierRequest } from "./rfq/types";
 
-/** Document kind for PDF / saved file identity */
+/** Document kind for PDF / saved file identity (priced documents only) */
 export type DocumentType = "quote" | "payment_request";
+
+/** Every kind of exported PDF; supplier RFQs live in their own collection and are never quotes. */
+export type PdfDocumentKind = DocumentType | "supplier_rfq";
 
 export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
   quote: "הצעת מחיר",
   payment_request: "חשבון עסקה",
 };
 
+export const SUPPLIER_RFQ_LABEL = "בקשה להצעת מחיר מספק";
+
 export function documentTypeLabel(type: DocumentType | undefined): string {
   return DOCUMENT_TYPE_LABELS[type === "payment_request" ? "payment_request" : "quote"];
 }
 
-export function documentTypeFolderName(type: DocumentType | undefined): string {
+export function documentTypeFolderName(type: PdfDocumentKind | undefined): string {
+  if (type === "supplier_rfq") return SUPPLIER_RFQ_LABEL;
   return documentTypeLabel(type);
 }
 
@@ -86,12 +93,14 @@ export type Quote = {
 };
 
 export type AppUIState = {
-  tab: "quote" | "customers";
+  tab: "quote" | "customers" | "rfq";
   settingsOpen: boolean;
   profilesSettingsOpen: boolean;
 };
 
 export type AppCurrentState = {
+  /** Saved quote this document updates; unset until first save (a customer can own many quotes) */
+  quoteId?: string;
   customerName: string;
   customerPhone: string;
   customerEmail: string;
@@ -122,4 +131,11 @@ export type AppState = {
   dimensionUnit?: DimensionUnit; // ס״מ or מ״מ – display/input only; data always in cm
   /** Next serial for חשבון עסקה (increments when a new number is allocated) */
   nextPaymentRequestNumber?: number;
+  /** Saved supplier requests for quotation (separate from priced quotes) */
+  supplierRequests: SupplierRequest[];
+  /** RFQ currently being edited (persisted so work survives restarts) */
+  rfqDraft: SupplierRequest | null;
+  /** Next serial for supplier RFQs; independent from payment-request numbering */
+  nextSupplierRequestNumber: number;
+  rfqSettings: RfqSettings;
 };

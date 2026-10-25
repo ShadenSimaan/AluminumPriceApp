@@ -1,7 +1,7 @@
 // FILE: src/pdfExporter.ts
 // Handles PDF export for the aluminum quote app
 
-import type { DocumentType } from "./types";
+import type { DocumentType, PdfDocumentKind } from "./types";
 import { documentTypeFolderName, normalizeDocumentType } from "./types";
 
 // Check if running in Tauri
@@ -15,7 +15,7 @@ async function getPdfSavePath(
   filename: string,
   year: number,
   customFolder?: string,
-  documentType?: DocumentType
+  documentType?: PdfDocumentKind
 ): Promise<string | null> {
   if (!isTauri()) {
     return null; // Browser - use download
@@ -544,6 +544,26 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     };
   }
 
+  return savePdfBytes(pdfArrayBuffer, {
+    filename,
+    year: yyyy,
+    pdfSaveFolder: payload.pdfSaveFolder,
+    documentType,
+  });
+}
+
+/**
+ * Save already-built PDF bytes: Tauri → [custom folder or Desktop/{type}]/[year]/filename and reveal it;
+ * browser → open in a new tab and download.
+ */
+export async function savePdfBytes(
+  pdfArrayBuffer: ArrayBuffer,
+  opts: { filename: string; year: number; pdfSaveFolder?: string; documentType?: PdfDocumentKind }
+): Promise<PdfExportResult> {
+  const { filename, documentType } = opts;
+  const yyyy = opts.year;
+  const payload = { pdfSaveFolder: opts.pdfSaveFolder };
+
   // 🔹 IMPORTANT PART: Save PDF and open it
   // Check if we're in Tauri environment
   const isTauriEnv = isTauri();
@@ -784,7 +804,8 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
     a.href = url;
     a.download = filename;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoking immediately can blank the tab opened above before it has loaded.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
     return { success: true, savedPath: "" };
   }
 }
@@ -828,6 +849,11 @@ export async function printQuotePdf(payload: PdfQuotePayload): Promise<PdfPrintR
     payload.documentNumber
   );
 
+  return printPdfBytes(pdfArrayBuffer, filename);
+}
+
+/** Open already-built PDF bytes for printing (Tauri: temp file in the default viewer; browser: print dialog). */
+export async function printPdfBytes(pdfArrayBuffer: ArrayBuffer, filename: string): Promise<PdfPrintResult> {
   if (isTauri()) {
     try {
       // Write to TEMP only — avoids Desktop/subfolder scope issues (exists/mkdir).
@@ -890,7 +916,7 @@ export async function printQuotePdf(payload: PdfQuotePayload): Promise<PdfPrintR
 /** Returns the folder path where PDFs are (or will be) saved. Null if not in Tauri. */
 export async function getPdfSaveFolderPath(
   customFolder?: string,
-  documentType?: DocumentType
+  documentType?: PdfDocumentKind
 ): Promise<string | null> {
   if (!isTauri()) return null;
   try {
@@ -918,7 +944,7 @@ export async function getPdfSaveFolderPath(
 /** Opens the folder where PDF files are saved (year subfolder that actually contains the PDFs). */
 export async function openPdfSaveFolder(
   customFolder?: string,
-  documentType?: DocumentType
+  documentType?: PdfDocumentKind
 ): Promise<{ success: boolean; error?: string }> {
   if (!isTauri()) {
     return { success: false, error: "זמין רק באפליקציה" };

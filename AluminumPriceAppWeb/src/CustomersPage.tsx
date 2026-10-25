@@ -1,41 +1,61 @@
 // FILE: src/CustomersPage.tsx
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Copy, FileText, FolderOpen, MoreVertical, Trash2 } from "lucide-react";
-import { Customer, Quote } from "./types";
+import { ChevronDown, ChevronUp, Copy, FileText, FolderOpen, MoreVertical, Trash2, Upload } from "lucide-react";
+import { Customer, Quote, documentTypeLabel } from "./types";
+import type { DraftRow } from "./customers/customerImport";
+
+const CustomerImportDialog = React.lazy(() => import("./customers/CustomerImportDialog"));
 
 const fmtCurrency = new Intl.NumberFormat("he-IL", {
   style: "currency",
   currency: "ILS",
 });
 const fmtDate = new Intl.DateTimeFormat("he-IL", { dateStyle: "medium" });
+const fmtDateTime = new Intl.DateTimeFormat("he-IL", { dateStyle: "medium", timeStyle: "short" });
 
 type CustomersPageProps = {
   customers: Customer[];
   quotes: Quote[];
+  /** Saved quote currently open in the הצעה tab */
+  openQuoteId?: string;
   onOpenLast: (customerId: string) => void;
+  onOpenQuote: (quoteId: string) => void;
+  onDeleteQuote: (quoteId: string) => void;
   /** Open the folder where PDFs are saved (replaces per-customer export in list) */
   onOpenPdfFolder?: () => void;
   onDeleteCustomer: (customerId: string) => void;
   onDuplicateCustomer: (customerId: string) => void;
+  onImportCustomers: (rows: DraftRow[]) => void;
 };
 
 const CustomersPage: React.FC<CustomersPageProps> = ({
   customers,
   quotes,
+  openQuoteId,
   onOpenLast,
+  onOpenQuote,
+  onDeleteQuote,
   onOpenPdfFolder,
   onDeleteCustomer,
   onDuplicateCustomer,
+  onImportCustomers,
 }) => {
-  const latestMap = useMemo(() => {
+  const [importOpen, setImportOpen] = useState(false);
+  const quotesByCustomer = useMemo(() => {
     const grouped: Record<string, Quote[]> = {};
     for (const q of quotes) (grouped[q.customerId] ||= []).push(q);
-    const latest: Record<string, Quote> = {};
-    for (const id in grouped)
-      latest[id] = grouped[id].sort((a, b) => b.date - a.date)[0];
-    return latest;
+    for (const id in grouped) grouped[id] = [...grouped[id]].sort((a, b) => b.date - a.date);
+    return grouped;
   }, [quotes]);
+  const latestMap = useMemo(() => {
+    const latest: Record<string, Quote> = {};
+    for (const id in quotesByCustomer) latest[id] = quotesByCustomer[id][0];
+    return latest;
+  }, [quotesByCustomer]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const toggleExpanded = (customerId: string) =>
+    setExpandedId((cur) => (cur === customerId ? null : customerId));
 
   const sortedCustomers = useMemo(
     () => [...customers].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
@@ -45,12 +65,33 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
   return (
     <section className="grid gap-4 min-w-0 w-full">
       <div className="card p-4 sm:p-5 w-full border-slate-200/80 shadow-sm">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-4 pb-4 mb-1 border-b border-slate-100">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 pb-4 mb-1 border-b border-slate-100">
           <div>
             <h2 className="text-lg font-semibold text-slate-900 tracking-tight">לקוחות</h2>
             <p className="text-xs text-slate-500 mt-0.5">ניהול לקוחות והצעות אחרונות</p>
           </div>
+          <button
+            type="button"
+            className="inline-flex h-9 items-center gap-1.5 self-start sm:self-auto rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+            onClick={() => setImportOpen(true)}
+            title="ייבוא לקוחות מקובץ CSV / Excel / אנשי קשר"
+          >
+            <Upload className="h-4 w-4 shrink-0" aria-hidden />
+            ייבוא לקוחות
+          </button>
         </div>
+        {importOpen && (
+          <React.Suspense fallback={null}>
+            <CustomerImportDialog
+              customers={customers}
+              onClose={() => setImportOpen(false)}
+              onImport={(rows) => {
+                onImportCustomers(rows);
+                setImportOpen(false);
+              }}
+            />
+          </React.Suspense>
+        )}
 
         {/* Mobile: cards */}
         <div className="grid sm:hidden grid-cols-1 gap-3">
@@ -82,6 +123,20 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
                       onDelete={() => onDeleteCustomer(c.id)}
                     />
                   </div>
+                  <QuotesToggle
+                    count={quotesByCustomer[c.id]?.length ?? 0}
+                    expanded={expandedId === c.id}
+                    onToggle={() => toggleExpanded(c.id)}
+                    className="mt-3"
+                  />
+                  {expandedId === c.id && (
+                    <CustomerQuotesList
+                      quotes={quotesByCustomer[c.id] ?? []}
+                      openQuoteId={openQuoteId}
+                      onOpen={onOpenQuote}
+                      onDelete={onDeleteQuote}
+                    />
+                  )}
                 </div>
               );
             })
@@ -96,6 +151,7 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
                 <Th>שם</Th>
                 <Th>טלפון</Th>
                 <Th>אימייל</Th>
+                <Th>הצעות שמורות</Th>
                 <Th>הצעה אחרונה</Th>
                 <Th>סכום אחרון</Th>
                 <Th className="w-[1%] whitespace-nowrap">פעולות</Th>
@@ -104,19 +160,28 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
             <tbody className="divide-y divide-slate-100">
               {sortedCustomers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-10 text-center text-slate-500">
+                  <td colSpan={7} className="py-10 text-center text-slate-500">
                     אין לקוחות עדיין
                   </td>
                 </tr>
               ) : (
                 sortedCustomers.map((c) => {
                   const last = latestMap[c.id];
+                  const expanded = expandedId === c.id;
                   return (
-                    <tr key={c.id} className="bg-white hover:bg-slate-50/70 transition-colors">
+                    <React.Fragment key={c.id}>
+                    <tr className="bg-white hover:bg-slate-50/70 transition-colors">
                       <Td>{c.name}</Td>
                       <Td>{c.phone ?? ""}</Td>
                       <Td className="max-w-[14rem] truncate" title={c.email ?? undefined}>
                         {c.email ?? ""}
+                      </Td>
+                      <Td>
+                        <QuotesToggle
+                          count={quotesByCustomer[c.id]?.length ?? 0}
+                          expanded={expanded}
+                          onToggle={() => toggleExpanded(c.id)}
+                        />
                       </Td>
                       <Td>{last ? fmtDate.format(new Date(last.date)) : ""}</Td>
                       <Td>
@@ -133,6 +198,19 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
                         </div>
                       </Td>
                     </tr>
+                    {expanded && (
+                      <tr className="bg-slate-50/60">
+                        <td colSpan={7} className="px-3 pb-3">
+                          <CustomerQuotesList
+                            quotes={quotesByCustomer[c.id] ?? []}
+                            openQuoteId={openQuoteId}
+                            onOpen={onOpenQuote}
+                            onDelete={onDeleteQuote}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   );
                 })
               )}
@@ -145,6 +223,103 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
 };
 
 export default CustomersPage;
+
+function QuotesToggle({
+  count,
+  expanded,
+  onToggle,
+  className,
+}: {
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  className?: string;
+}) {
+  if (count === 0) return <span className={`text-xs text-slate-400 ${className ?? ""}`}>אין</span>;
+  return (
+    <button
+      type="button"
+      className={`inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 ${className ?? ""}`}
+      onClick={onToggle}
+      aria-expanded={expanded}
+    >
+      {count === 1 ? "הצעה אחת" : `${count} הצעות`}
+      {expanded ? (
+        <ChevronUp className="h-3.5 w-3.5" aria-hidden />
+      ) : (
+        <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+      )}
+    </button>
+  );
+}
+
+function CustomerQuotesList({
+  quotes,
+  openQuoteId,
+  onOpen,
+  onDelete,
+}: {
+  quotes: Quote[];
+  openQuoteId?: string;
+  onOpen: (quoteId: string) => void;
+  onDelete: (quoteId: string) => void;
+}) {
+  return (
+    <ul className="mt-2 grid gap-2 whitespace-normal">
+      {quotes.map((q) => {
+        const isPaymentRequest = q.documentType === "payment_request";
+        const itemCount = (q.items?.length ?? 0) + (q.freeFormAdditions?.length ?? 0);
+        return (
+          <li
+            key={q.id}
+            className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2"
+          >
+            <div className="min-w-0 text-sm text-slate-800">
+              <span className="font-medium">
+                {documentTypeLabel(q.documentType)}
+                {isPaymentRequest && q.documentNumber
+                  ? ` מס׳ ${String(q.documentNumber).padStart(4, "0")}`
+                  : ""}
+              </span>
+              <span className="text-slate-500">
+                {" • "}
+                {fmtDateTime.format(new Date(q.date))}
+                {" • "}
+                {itemCount === 1 ? "פריט אחד" : `${itemCount} פריטים`}
+                {" • "}
+                {fmtCurrency.format(q.totals?.grand ?? 0)}
+              </span>
+              {q.id === openQuoteId && (
+                <span className="mr-2 rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-800">
+                  פתוח כעת
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-sky-500 px-3 text-sm font-medium text-white hover:bg-sky-600"
+                onClick={() => onOpen(q.id)}
+              >
+                <FileText className="h-4 w-4 shrink-0" aria-hidden />
+                פתח
+              </button>
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-red-600 hover:bg-red-50"
+                onClick={() => onDelete(q.id)}
+                aria-label="מחיקת הצעה"
+                title="מחיקת הצעה"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 type CustomerRowActionsProps = {
   onOpenLast: () => void;
@@ -307,9 +482,10 @@ function Th({ children, className }: { children: React.ReactNode; className?: st
     </th>
   );
 }
-function Td({ children, className }: { children: React.ReactNode; className?: string }) {
+function Td({ children, className, title }: { children: React.ReactNode; className?: string; title?: string }) {
   return (
     <td
+      title={title}
       className={`text-right px-3 py-2.5 align-top whitespace-nowrap text-slate-800 ${className ?? ""}`}
     >
       {children}

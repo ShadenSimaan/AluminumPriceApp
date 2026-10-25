@@ -2,55 +2,27 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Settings } from "lucide-react";
 import { exportQuotePdf, openPdfSaveFolder, printQuotePdf } from "./pdfExporter";
-import { AppCurrentState, AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, Quote, DocumentType, documentTypeLabel, normalizeDocumentType } from "./types";
+import { AppCurrentState, AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, Quote, documentTypeLabel, normalizeDocumentType } from "./types";
 import { readStateFromFile, writeStateToFile, isTauri, getDataFilePath } from "./storage";
 import QuotePage from "./QuotePage";
 import CustomersPage from "./CustomersPage";
+import type { RfqSlice } from "./rfq/rfqState";
+import { DEFAULT_STATE, normalizeState, uuid } from "./appState";
+import { confirmDestructive } from "./confirmDialog";
+import { applyCustomerImport, type DraftRow } from "./customers/customerImport";
 
 /** =========================
  *  Constants & Utilities
  *  ========================= */
 const LS_KEY = "aluminum-quote-app:new-mobile-style-v1";
 
-function uuid() {
-  if ((crypto as any)?.randomUUID) return crypto.randomUUID();
-  const buf = new Uint8Array(16);
-  (crypto as any).getRandomValues?.(buf);
-  buf[6] = (buf[6] & 0x0f) | 0x40;
-  buf[8] = (buf[8] & 0x3f) | 0x80;
-  const toHex = (n: number) => n.toString(16).padStart(2, "0");
-  return [...buf].map(toHex).join("");
-}
+const RfqPage = React.lazy(() => import("./rfq/RfqPage"));
 
 function parseLooseNumber(s: string): number {
   if (!s || !s.trim()) return 0;
   const cleaned = s.replace(/[^\d.,-]/g, "").replace(",", ".");
   const n = parseFloat(cleaned);
   return isFinite(n) ? n : 0;
-}
-
-/** Ask for confirmation before a destructive action (Tauri dialog or browser confirm). */
-async function confirmDestructive(
-  message: string,
-  options?: { title?: string; okLabel?: string; cancelLabel?: string }
-): Promise<boolean> {
-  const title = options?.title ?? "אישור מחיקה";
-  const okLabel = options?.okLabel ?? "כן, מחק";
-  const cancelLabel = options?.cancelLabel ?? "ביטול";
-  if (isTauri()) {
-    try {
-      const dialogModule = await import("@tauri-apps/plugin-dialog");
-      return await dialogModule.confirm(message, {
-        title,
-        kind: "warning",
-        okLabel,
-        cancelLabel,
-      });
-    } catch {
-      return window.confirm(message);
-    }
-  }
-  return window.confirm(message);
 }
 
 // Accept 0.18 or 18, return decimal (0.18)
@@ -65,143 +37,9 @@ const fmtCurrency = new Intl.NumberFormat("he-IL", {
   currency: "ILS",
 });
 
-const defaultProfiles: Profile[] = [
-  { id: uuid(), name: "1700 זכוכית ורשת", unitPrice: 1100 },
-  { id: uuid(), name: "1700 זכוכית ורשת ותריס אור", unitPrice: 2200 },
-
-  { id: uuid(), name: "7300 זכוכית ורשת", unitPrice: 1800 },
-  { id: uuid(), name: "7300 זכוכית ורשת ותריס אור", unitPrice: 2600 },
-
-  { id: uuid(), name: "4300 זכוכית ורשת", unitPrice: 1100 },
-  { id: uuid(), name: "4300 זכוכית ורשת ותריס אור", unitPrice: 2300 },
-
-  { id: uuid(), name: "7600 זכוכית", unitPrice: 3000 },
-  { id: uuid(), name: "7600 זכוכית ותריס אור", unitPrice: 3800 },
-
-  { id: uuid(), name: "5600 כנף ורשת", unitPrice: 1700 },
-  { id: uuid(), name: "5600 כנף ורשת ותריס אור", unitPrice: 2700 },
-];
-
-const defaultAddonsPreset = [
-  { id: uuid(), name: "מנגנון דרי קיף", price: "650", checked: false },
-  { id: uuid(), name: "מנוע חשמלי סמפי/נייס", price: "800", checked: false },
-  { id: uuid(), name: "מנוע סיני", price: "300", checked: false },
-];
-
 // Helper to create addons from global addons list
 function createAddonsFromGlobal(globalAddons: Addon[]): Addon[] {
   return globalAddons.map((a) => ({ ...a, checked: false }));
-}
-
-/** ===== Default state ===== */
-const DEFAULT_STATE: AppState = {
-  customers: [],
-  quotes: [],
-  profiles: defaultProfiles,
-  addons: defaultAddonsPreset.map((a) => ({ ...a })),
-  current: {
-    customerName: "",
-    customerPhone: "",
-    customerEmail: "",
-    customerNotes: "",
-    title: "הצעת מחיר",
-    documentType: "quote",
-    documentNumber: undefined,
-    items: [],
-    freeFormAdditions: [],
-    taxPercentText: "18",
-    notes: "",
-    showTotals: true,
-  },
-  ui: { tab: "quote", settingsOpen: false, profilesSettingsOpen: false },
-  pdfSaveFolder: undefined,
-  dimensionUnit: "cm",
-  nextPaymentRequestNumber: 1,
-};
-
-/** ===== Normalize a raw object into valid AppState (for LS or data file) ===== */
-function normalizeState(obj: unknown): AppState {
-  const o: Partial<AppState> =
-    typeof obj === "object" && obj !== null ? (obj as Partial<AppState>) : {};
-  const customers = Array.isArray(o.customers) ? o.customers : [];
-  const quotesRaw = Array.isArray(o.quotes) ? o.quotes : [];
-  const quotes: Quote[] = quotesRaw.map((q: any) => {
-    const documentType = normalizeDocumentType(q?.documentType);
-    const documentNumber =
-      documentType === "payment_request" &&
-      typeof q?.documentNumber === "number" &&
-      isFinite(q.documentNumber) &&
-      q.documentNumber > 0
-        ? Math.floor(q.documentNumber)
-        : undefined;
-    return {
-      ...q,
-      documentType,
-      documentNumber,
-      title: q?.title || documentTypeLabel(documentType),
-    };
-  });
-  const profiles =
-    Array.isArray(o.profiles) && o.profiles.length > 0 ? o.profiles : defaultProfiles;
-  const addons =
-    Array.isArray(o.addons) && o.addons.length > 0
-      ? o.addons
-      : defaultAddonsPreset.map((a) => ({ ...a }));
-  const currentRaw: any = o.current ?? {};
-  const currentDocumentType = normalizeDocumentType(currentRaw.documentType);
-  const currentDocumentNumber =
-    typeof currentRaw.documentNumber === "number" &&
-    isFinite(currentRaw.documentNumber) &&
-    currentRaw.documentNumber > 0
-      ? Math.floor(currentRaw.documentNumber)
-      : undefined;
-  const current = {
-    customerName: String(currentRaw.customerName ?? ""),
-    customerPhone: String(currentRaw.customerPhone ?? ""),
-    customerEmail: String(currentRaw.customerEmail ?? ""),
-    customerNotes: String(currentRaw.customerNotes ?? ""),
-    title: String(currentRaw.title ?? documentTypeLabel(currentDocumentType)),
-    documentType: currentDocumentType,
-    documentNumber: currentDocumentNumber,
-    items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
-    freeFormAdditions: Array.isArray(currentRaw.freeFormAdditions) ? currentRaw.freeFormAdditions : [],
-    taxPercentText: String(currentRaw.taxPercentText ?? "18"),
-    notes: String(currentRaw.notes ?? ""),
-    showTotals: currentRaw.showTotals !== false,
-  };
-  const uiRaw: any = o.ui ?? {};
-  const tab: "quote" | "customers" = uiRaw.tab === "customers" ? "customers" : "quote";
-  const ui = {
-    tab,
-    settingsOpen: Boolean(uiRaw.settingsOpen ?? false),
-    profilesSettingsOpen: Boolean(uiRaw.profilesSettingsOpen ?? false),
-  };
-  const pdfSaveFolder = typeof o.pdfSaveFolder === "string" ? o.pdfSaveFolder : undefined;
-  const dimensionUnit = o.dimensionUnit === "mm" ? "mm" : "cm";
-
-  const maxExistingNumber = quotes.reduce((max, q) => {
-    const n = q.documentNumber;
-    return typeof n === "number" && n > max ? n : max;
-  }, 0);
-  const storedNext =
-    typeof o.nextPaymentRequestNumber === "number" &&
-    isFinite(o.nextPaymentRequestNumber) &&
-    o.nextPaymentRequestNumber > 0
-      ? Math.floor(o.nextPaymentRequestNumber)
-      : 1;
-  const nextPaymentRequestNumber = Math.max(storedNext, maxExistingNumber + 1);
-
-  return {
-    customers,
-    quotes,
-    profiles,
-    addons,
-    current,
-    ui,
-    pdfSaveFolder,
-    dimensionUnit,
-    nextPaymentRequestNumber,
-  };
 }
 
 /** ===== Validate + migrate any LS object to the proper shape ===== */
@@ -219,6 +57,24 @@ function hydrateState(): AppState {
 }
 
 /** ========= Pure helpers for saving customer & quote ========= */
+
+function emptyCurrentState(): AppCurrentState {
+  return {
+    quoteId: undefined,
+    customerName: "",
+    customerPhone: "",
+    customerEmail: "",
+    customerNotes: "",
+    title: "הצעת מחיר",
+    documentType: "quote",
+    documentNumber: undefined,
+    items: [],
+    freeFormAdditions: [],
+    notes: "",
+    taxPercentText: "18",
+    showTotals: true,
+  };
+}
 
 function upsertCustomerByName(
   s: AppState,
@@ -422,7 +278,16 @@ function saveQuoteToState(
   const taxValueLocal = subTotalLocal * taxDecimalLocal;
   const grandTotalLocal = subTotalLocal + taxValueLocal;
   const totals = { sub: subTotalLocal, tax: taxValueLocal, grand: grandTotalLocal };
-  const existingQuote = withCustomer.quotes.find((q) => q.customerId === customer.id);
+  const currentQuoteId = withCustomer.current.quoteId;
+  const currentContent = JSON.stringify(buildQuoteContentSnapshotFromCurrent(withCustomer.current));
+  // Documents opened before quotes had ids are matched by content so they don't become duplicates.
+  const existingQuote = currentQuoteId
+    ? withCustomer.quotes.find((q) => q.id === currentQuoteId)
+    : withCustomer.quotes.find(
+        (q) =>
+          q.customerId === customer.id &&
+          JSON.stringify(buildQuoteContentSnapshotFromQuote(q)) === currentContent
+      );
   const profilesSignature = getProfilesSignature(withCustomer.profiles);
   let quoteUnchanged = quoteMatchesCurrentSnapshot(
     existingQuote,
@@ -478,14 +343,12 @@ function saveQuoteToState(
     nextPaymentRequestNumber,
     current: {
       ...withCustomer.current,
+      quoteId: quote.id,
       title: documentTypeLabel(documentType),
       documentType,
       documentNumber: documentType === "payment_request" ? documentNumber : withCustomer.current.documentNumber,
     },
-    quotes: [
-      ...withCustomer.quotes.filter((q) => q.customerId !== customer.id),
-      quote,
-    ],
+    quotes: [...withCustomer.quotes.filter((q) => q.id !== quote.id), quote],
   };
 
   return { nextState, quote, quoteUnchanged };
@@ -544,7 +407,12 @@ export default function App() {
 
   // Persist on change: always localStorage; in Tauri also save to app data file (debounced)
   useEffect(() => {
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    } catch (e) {
+      // Quota can be exceeded (e.g. RFQ reference images); the Tauri data file below still persists.
+      console.warn("Could not write localStorage:", e);
+    }
   }, [state]);
 
   const fileWriteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -595,6 +463,30 @@ export default function App() {
       unitPrice: preserveUnitPrice ? e.unitPrice : p ? String(p.unitPrice) : "0",
     }));
   }, [activeProfileId, state.profiles]);
+
+  const rfqSlice: RfqSlice = {
+    supplierRequests: state.supplierRequests,
+    rfqDraft: state.rfqDraft,
+    nextSupplierRequestNumber: state.nextSupplierRequestNumber,
+    rfqSettings: state.rfqSettings,
+  };
+  const updateRfqSlice = useCallback((fn: (s: RfqSlice) => RfqSlice) => {
+    setState((s) => {
+      const next = fn({
+        supplierRequests: s.supplierRequests,
+        rfqDraft: s.rfqDraft,
+        nextSupplierRequestNumber: s.nextSupplierRequestNumber,
+        rfqSettings: s.rfqSettings,
+      });
+      return {
+        ...s,
+        supplierRequests: next.supplierRequests,
+        rfqDraft: next.rfqDraft,
+        nextSupplierRequestNumber: next.nextSupplierRequestNumber,
+        rfqSettings: next.rfqSettings,
+      };
+    });
+  }, []);
 
   const updateCurrent = useCallback(
     <K extends keyof AppState["current"]>(key: K, val: AppState["current"][K]) => {
@@ -793,24 +685,10 @@ export default function App() {
   function startNewEmptyQuote() {
     setState((s) => {
       const { nextState } = saveQuoteToState(s);
-      const emptyCurrent = {
-        customerName: "",
-        customerPhone: "",
-        customerEmail: "",
-        customerNotes: "",
-        title: "הצעת מחיר",
-        documentType: "quote" as DocumentType,
-        documentNumber: undefined as number | undefined,
-        items: [] as LineItem[],
-        freeFormAdditions: [] as FreeFormAddition[],
-        notes: "",
-        taxPercentText: "18",
-        showTotals: true,
-      };
       return {
         ...nextState,
         ui: { ...nextState.ui, tab: "quote" as const },
-        current: emptyCurrent,
+        current: emptyCurrentState(),
       };
     });
     clearCurrentForm();
@@ -837,36 +715,60 @@ export default function App() {
   const taxValue = subTotal * taxDecimal;
   const grandTotal = subTotal + taxValue;
 
-  function saveQuote(showFeedback = true) {
-    setState((prev) => {
-      const { nextState, error } = saveQuoteToState(prev);
+  const savedQuote = state.current.quoteId
+    ? state.quotes.find((q) => q.id === state.current.quoteId)
+    : undefined;
+  const savedCustomerName = savedQuote
+    ? state.customers.find((c) => c.id === savedQuote.customerId)?.name
+    : undefined;
+  const hasUnsavedChanges = savedQuote
+    ? savedCustomerName !== state.current.customerName.trim().replace(/^לכבוד\s+/, "").trim() ||
+      JSON.stringify(buildQuoteContentSnapshotFromQuote(savedQuote)) !==
+        JSON.stringify(buildQuoteContentSnapshotFromCurrent(state.current))
+    : Boolean(
+        state.current.customerName.trim() ||
+          state.current.items.length ||
+          state.current.freeFormAdditions.length
+      );
 
-      if (showFeedback) {
-        if (error) {
-          showToast(error, "error");
-        } else {
-          showToast("הצעה נשמרה ללקוח בהצלחה", "success");
-        }
-      }
-
-      return nextState;
-    });
+  function saveQuote() {
+    const { nextState, error } = saveQuoteToState(state);
+    if (error) {
+      showToast(error, "error");
+      return;
+    }
+    setState(nextState);
+    const label = documentTypeLabel(nextState.current.documentType);
+    showToast(`ה${label} נשמרה — ניתן לראות אותה בלשונית לקוחות`, "success");
   }
 
   function openLastQuoteForCustomer(customerId: string) {
     const q = [...state.quotes]
       .filter((x) => x.customerId === customerId)
       .sort((a, b) => b.date - a.date)[0];
-    const customer = state.customers.find((c) => c.id === customerId);
-    if (!q || !customer) {
+    if (!q) {
       showToast("אין הצעה שמורה ללקוח זה", "error");
       return;
     }
-    setState((s) => ({
+    openQuote(q.id);
+  }
+
+  function openQuote(quoteId: string) {
+    const q = state.quotes.find((x) => x.id === quoteId);
+    const customer = q && state.customers.find((c) => c.id === q.customerId);
+    if (!q || !customer) {
+      showToast("ההצעה לא נמצאה", "error");
+      return;
+    }
+    setState((prev) => {
+      // Keep whatever is open now before replacing it, as "הצעה חדשה" does.
+      const s = prev.current.quoteId === quoteId ? prev : saveQuoteToState(prev).nextState;
+      return {
       ...s,
       ui: { ...s.ui, tab: "quote" },
       current: {
         ...s.current,
+        quoteId: q.id,
         customerName: customer.name,
         customerPhone: q.customerPhone ?? customer.phone ?? "",
         customerEmail: q.customerEmail ?? customer.email ?? "",
@@ -880,8 +782,30 @@ export default function App() {
         notes: q.notes ?? "",
         showTotals: q.showTotals !== false,
       },
-    }));
+      };
+    });
     clearCurrentForm();
+  }
+
+  async function deleteQuote(quoteId: string) {
+    const q = state.quotes.find((x) => x.id === quoteId);
+    if (!q) return;
+    const customer = state.customers.find((c) => c.id === q.customerId);
+    const label = documentTypeLabel(q.documentType);
+    const confirmed = await confirmDestructive(
+      `האם אתה בטוח שברצונך למחוק את ה${label} מתאריך ${new Date(q.date).toLocaleDateString("he-IL")}${
+        customer ? ` של "${customer.name}"` : ""
+      }?`
+    );
+    if (!confirmed) return;
+    setState((s) => ({
+      ...s,
+      quotes: s.quotes.filter((x) => x.id !== quoteId),
+      // Clearing the open copy keeps the next auto-save from bringing the deleted quote back.
+      current: s.current.quoteId === quoteId ? emptyCurrentState() : s.current,
+    }));
+    if (state.current.quoteId === quoteId) clearCurrentForm();
+    showToast(`ה${label} נמחקה`, "success");
   }
 
   async function deleteCustomer(customerId: string) {
@@ -938,6 +862,13 @@ export default function App() {
         : "הלקוח שוכפל (לא נמצאו הצעות שמורות ללקוח המקורי)",
       "success"
     );
+  }
+
+  function importCustomers(rows: DraftRow[]) {
+    const { customers, added, updated } = applyCustomerImport(state.customers, rows, uuid);
+    setState((s) => ({ ...s, customers }));
+    const parts = [added ? `${added} לקוחות נוספו` : "", updated ? `${updated} לקוחות עודכנו` : ""].filter(Boolean);
+    showToast(parts.length ? `הייבוא הושלם: ${parts.join(", ")}` : "לא נמצאו לקוחות חדשים לייבוא", parts.length ? "success" : "info");
   }
 
   // ======== PDF EXPORT =========
@@ -1414,6 +1345,19 @@ export default function App() {
               >
                 לקוחות
               </button>
+              <button
+                className={`px-3 py-1.5 rounded-lg text-sm ${
+                  state.ui.tab === "rfq"
+                    ? "bg-sky-500 text-white"
+                    : "hover:bg-slate-100"
+                }`}
+                onClick={() =>
+                  setState((s) => ({ ...s, ui: { ...s.ui, tab: "rfq" } }))
+                }
+                title="בקשה להצעת מחיר מספק — Supplier Request for Quotation"
+              >
+                בקשה לספק
+              </button>
             </nav>
             <button
               className="inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100 text-sm font-medium shadow-sm"
@@ -1458,6 +1402,9 @@ export default function App() {
             onUpdateFreeFormAddition={updateFreeFormAddition}
             onRemoveFreeFormAddition={removeFreeFormAddition}
             onReorderFreeFormAdditions={reorderFreeFormAdditions}
+            onSaveQuote={saveQuote}
+            isSaved={Boolean(savedQuote) && !hasUnsavedChanges}
+            hasUnsavedChanges={hasUnsavedChanges}
             onExportPdf={handleExportPdf}
             onPrintPdf={handlePrintPdf}
             showPdfFolderControl={isTauri()}
@@ -1468,14 +1415,28 @@ export default function App() {
             onAddProfileQuick={addProfileQuick}
             onUpdateProfileQuick={updateProfileQuick}
           />
+        ) : state.ui.tab === "rfq" ? (
+          <React.Suspense fallback={<div className="card p-6 text-center text-slate-500">…</div>}>
+            <RfqPage
+              slice={rfqSlice}
+              onChange={updateRfqSlice}
+              appDimensionUnit={state.dimensionUnit ?? "cm"}
+              pdfSaveFolder={state.pdfSaveFolder}
+              showToast={showToast}
+            />
+          </React.Suspense>
         ) : (
           <CustomersPage
             customers={state.customers}
             quotes={state.quotes}
+            openQuoteId={state.current.quoteId}
             onOpenLast={openLastQuoteForCustomer}
+            onOpenQuote={openQuote}
+            onDeleteQuote={deleteQuote}
             onOpenPdfFolder={isTauri() ? handleOpenPdfFolder : undefined}
             onDeleteCustomer={deleteCustomer}
             onDuplicateCustomer={duplicateCustomer}
+            onImportCustomers={importCustomers}
           />
         )}
 

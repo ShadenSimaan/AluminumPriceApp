@@ -1,6 +1,6 @@
 // FILE: src/QuotePage.tsx
 import React, { useMemo } from "react";
-import { Pencil, Settings } from "lucide-react";
+import { Pencil, Save, Settings } from "lucide-react";
 import { AppState, LineItem, FreeFormAddition, DocumentType, DOCUMENT_TYPE_LABELS } from "./types";
 import {
   Select,
@@ -91,6 +91,9 @@ type QuotePageProps = {
   onUpdateFreeFormAddition: (id: string, updated: any) => void;
   onRemoveFreeFormAddition: (id: string) => void;
   onReorderFreeFormAdditions: (reordered: FreeFormAddition[]) => void;
+  onSaveQuote: () => void;
+  isSaved: boolean;
+  hasUnsavedChanges: boolean;
   onExportPdf: () => void;
   /** Open PDF in a viewer for printing / printer selection */
   onPrintPdf?: () => void;
@@ -133,6 +136,9 @@ const QuotePage: React.FC<QuotePageProps> = ({
   onUpdateFreeFormAddition,
   onRemoveFreeFormAddition,
   onReorderFreeFormAdditions,
+  onSaveQuote,
+  isSaved,
+  hasUnsavedChanges,
   onExportPdf,
   onPrintPdf,
   showPdfFolderControl,
@@ -425,7 +431,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
       )}
       {/* Document type */}
       <section className="card p-4 w-full">
-        <h2 className="text-xl font-semibold mb-3">סוג מסמך</h2>
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <h2 className="text-xl font-semibold">סוג מסמך</h2>
+          <SaveQuoteControl onSave={onSaveQuote} isSaved={isSaved} hasUnsavedChanges={hasUnsavedChanges} />
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
           <div className="grid gap-1.5">
             <label className="text-sm font-medium text-slate-700">סוג הקובץ</label>
@@ -1434,9 +1443,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
           />
         </div>
 
-        {/* Final actions: export / print + PDF folder (when in Tauri) — saving is automatic; keep buttons on the right in RTL */}
+        {/* Final actions: save / export / print + PDF folder (when in Tauri); keep buttons on the right in RTL */}
         <div className="mt-4 flex flex-col gap-2">
           <div className="flex flex-wrap gap-2 items-center justify-start">
+            <SaveQuoteControl onSave={onSaveQuote} isSaved={isSaved} hasUnsavedChanges={hasUnsavedChanges} />
             <button
               className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:opacity-95"
               onClick={onExportPdf}
@@ -1753,6 +1763,35 @@ const QuotePage: React.FC<QuotePageProps> = ({
 export default QuotePage;
 
 /** ===== local small UI bits for this page ===== */
+function SaveQuoteControl({
+  onSave,
+  isSaved,
+  hasUnsavedChanges,
+}: {
+  onSave: () => void;
+  isSaved: boolean;
+  hasUnsavedChanges: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button
+        type="button"
+        className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:opacity-95 inline-flex items-center gap-2"
+        onClick={onSave}
+        title="שמירת המסמך ללקוח — יופיע בלשונית לקוחות"
+      >
+        <Save className="w-4 h-4 shrink-0" aria-hidden />
+        שמירה
+      </button>
+      {isSaved ? (
+        <span className="text-xs text-emerald-700">✓ נשמר</span>
+      ) : hasUnsavedChanges ? (
+        <span className="text-xs text-amber-700">יש שינויים שלא נשמרו</span>
+      ) : null}
+    </div>
+  );
+}
+
 function EditableCellButton({
   onClick,
   title,

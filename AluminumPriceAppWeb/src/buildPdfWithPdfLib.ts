@@ -147,7 +147,7 @@ const LOCAL_HEBREW_FONT_PATHS = [
 ];
 
 /** Load Hebrew font bytes: local TTF first, then CDN TTF, then WOFF2/WOFF. */
-async function loadHebrewFontBytes(): Promise<ArrayBuffer> {
+export async function loadHebrewFontBytes(): Promise<ArrayBuffer> {
   // Prefer local TTF so PDFs render correctly on iOS/Android without CORS or WOFF issues.
   if (typeof document !== "undefined" && document.baseURI) {
     try {
