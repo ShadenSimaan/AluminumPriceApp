@@ -58,8 +58,14 @@ const CustomersPage: React.FC<CustomersPageProps> = ({
     setExpandedId((cur) => (cur === customerId ? null : customerId));
 
   const sortedCustomers = useMemo(
-    () => [...customers].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
-    [customers]
+    () =>
+      [...customers].sort((a, b) => {
+        const latestA = latestMap[a.id]?.date ?? 0;
+        const latestB = latestMap[b.id]?.date ?? 0;
+        if (latestB !== latestA) return latestB - latestA;
+        return (b.createdAt ?? 0) - (a.createdAt ?? 0);
+      }),
+    [customers, latestMap]
   );
 
   return (

@@ -565,6 +565,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     year: yyyy,
     pdfSaveFolder: payload.pdfSaveFolder,
     documentType,
+    replaceExisting,
   });
 }
 
@@ -574,7 +575,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
  */
 export async function savePdfBytes(
   pdfArrayBuffer: ArrayBuffer,
-  opts: { filename: string; year: number; pdfSaveFolder?: string; documentType?: PdfDocumentKind }
+  opts: { filename: string; year: number; pdfSaveFolder?: string; documentType?: PdfDocumentKind; replaceExisting?: boolean }
 ): Promise<PdfExportResult> {
   const { filename, documentType } = opts;
   const yyyy = opts.year;
@@ -650,7 +651,7 @@ export async function savePdfBytes(
       
       // If using custom folder, try to use save dialog to get permission.
       // Skipped when replacing: the user already confirmed, and Windows would ask to overwrite a second time.
-      if (payload.pdfSaveFolder && payload.pdfSaveFolder.trim() && !replaceExisting) {
+      if (payload.pdfSaveFolder && payload.pdfSaveFolder.trim() && !opts.replaceExisting) {
         try {
           console.log("Using custom folder, attempting to get permission via save dialog...");
           const saveResult = await dialogModule.save({
