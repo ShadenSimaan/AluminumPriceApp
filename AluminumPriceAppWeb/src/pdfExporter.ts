@@ -2,7 +2,7 @@
 // Handles PDF export for the aluminum quote app
 
 import type { DocumentType, PdfDocumentKind } from "./types";
-import { documentTypeFolderName, normalizeDocumentType } from "./types";
+import { ADDITION_PROFILE_LABEL, documentTypeFolderName, normalizeDocumentType } from "./types";
 
 // Check if running in Tauri
 function isTauri(): boolean {
@@ -1355,6 +1355,7 @@ function drawItemsTable(
       ? doc.splitTextToSize(freeFormTotalStr, totalMaxWidth)
       : [];
 
+    const freeFormProfileLines = doc.splitTextToSize(ADDITION_PROFILE_LABEL, colWidths.profile - 8);
     const freeFormDetailsMaxWidth = colWidths.details - 8;
     const freeFormDetailsLines = add.name
       ? doc.splitTextToSize(add.name, freeFormDetailsMaxWidth)
@@ -1363,6 +1364,7 @@ function drawItemsTable(
     // Calculate row height based on wrapped text
     const freeFormLinesCount = Math.max(
       1,
+      freeFormProfileLines.length,
       freeFormDetailsLines.length,
       freeFormUnitPriceLines.length,
       freeFormQtyLines.length,
@@ -1398,7 +1400,8 @@ function drawItemsTable(
     const numStr = String(items.length + addIdx + 1);
     drawTextSmart(doc, numStr, colX.num - 4, baseline, { align: "right" });
 
-    // פרופיל - empty for free-form
+    drawColLines(freeFormProfileLines, colX.profile - 4);
+
     // מידות - empty for free-form
     // מיקום - empty for free-form
 

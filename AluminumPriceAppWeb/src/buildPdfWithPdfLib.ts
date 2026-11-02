@@ -4,7 +4,7 @@
  * Implements RTL (Right-to-Left) reversal so Hebrew displays correctly.
  */
 import type { PdfQuotePayload, PdfLineItem, PdfFreeFormAddition } from "./pdfExporter";
-import { documentTypeLabel, normalizeDocumentType } from "./types";
+import { ADDITION_PROFILE_LABEL, documentTypeLabel, normalizeDocumentType } from "./types";
 import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 
@@ -492,7 +492,11 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
   // profile is widened toward one line (up to PROFILE_MAX_SHARE of the table), then the rest is shared.
   const PROFILE_MAX_SHARE = 0.4;
   const flexCols = [
-    { key: "profile" as const, header: "פרופיל", texts: rows.map((r) => r.profileStr) },
+    {
+      key: "profile" as const,
+      header: "פרופיל",
+      texts: [...rows.map((r) => r.profileStr), ...(additions.length ? [ADDITION_PROFILE_LABEL] : [])],
+    },
     { key: "location" as const, header: "מיקום", texts: rows.map((r) => r.locationStr) },
     {
       key: "details" as const,
@@ -719,6 +723,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const totalWithVat = total * (1 + taxRate);
     const baseTotalText = `${formatNum(total)} ₪`;
     const vatTotalText = `עם מע״מ ${formatNum(totalWithVat)} ₪`;
+    const profileLines = wrapText(hebrewFont, latinFont, 12, ADDITION_PROFILE_LABEL, colW.profile - 8);
     const nameLines = wrapText(hebrewFont, latinFont, 12, add.name || "", colW.details - 8);
     const unitPriceLines = wrapText(hebrewFont, latinFont, 12, formatNum(price), colW.unitPrice - 8);
     const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);
@@ -729,6 +734,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const totalLinesWrapped: string[] = [...baseTotalLines, ...vatTotalLines];
     const rowLines = Math.max(
       1,
+      profileLines.length,
       nameLines.length,
       unitPriceLines.length,
       qtyLines.length,
@@ -766,6 +772,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       }
     };
     drawAdd(String(items.length + addIdx + 1), colRight.num, rowBaseline);
+    drawColLines(profileLines, colRight.profile);
     drawColLines(nameLines, colRight.details);
     drawColLines(unitPriceLines, colRight.unitPrice);
     drawColLines(qtyLines, colRight.qty);

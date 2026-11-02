@@ -56,6 +56,9 @@ export type FreeFormAddition = {
   qty: string; // text input
 };
 
+/** Shown in the profile column for free-form additions (quote table and PDF). */
+export const ADDITION_PROFILE_LABEL = "תוספת";
+
 export type LineItem = {
   id: string;
   widthCm: string; // text input

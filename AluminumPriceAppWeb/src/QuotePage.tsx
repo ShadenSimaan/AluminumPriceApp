@@ -1,7 +1,14 @@
 // FILE: src/QuotePage.tsx
 import React, { useMemo } from "react";
 import { Pencil, Save, Settings } from "lucide-react";
-import { AppState, LineItem, FreeFormAddition, DocumentType, DOCUMENT_TYPE_LABELS } from "./types";
+import {
+  AppState,
+  LineItem,
+  FreeFormAddition,
+  DocumentType,
+  DOCUMENT_TYPE_LABELS,
+  ADDITION_PROFILE_LABEL,
+} from "./types";
 import {
   Select,
   SelectContent,
@@ -352,6 +359,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
     setShowAddItemModal(true);
   }
 
+  function closeFreeFormModal() {
+    setShowFreeFormInput(false);
+    setNewFreeFormDraft({ name: "", price: "0", qty: "1" });
+  }
+
   function closeAddItemModal() {
     setShowAddItemModal(false);
     setAddItemModalEditingId(null);
@@ -571,6 +583,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
         details: [it.details, addonsText].filter(Boolean).join(" — "),
       };
     });
+    state.current.freeFormAdditions.forEach((add) => {
+      rows.push({
+        dims: "",
+        perItem: parseLooseNumber(add.price),
+        qty: Math.max(0, parseLooseNumber(add.qty)),
+        profile: ADDITION_PROFILE_LABEL,
+        location: "",
+        details: add.name || "",
+      });
+    });
     return {
       headers: {
         num: "מס׳",
@@ -593,7 +615,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
       total: rows.map((r) => fmtCurrency.format(r.perItem * r.qty)),
       actions: rows.length ? ["מחיקה"] : [],
     };
-  }, [state.current.items, dimensionUnit]);
+  }, [state.current.items, state.current.freeFormAdditions, dimensionUnit]);
   const itemsColumns = useItemsColumnWidths(itemsColumnContent);
 
   return (
@@ -1037,6 +1059,79 @@ const QuotePage: React.FC<QuotePageProps> = ({
         </div>
       )}
 
+      {/* Add free-form addition popup — the row joins the items table with "תוספת" as its profile */}
+      {showFreeFormInput && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={closeFreeFormModal}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-lg w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b flex items-center justify-between">
+              <h2 className="text-xl font-semibold">הוספת תוספת להצעה</h2>
+              <button
+                type="button"
+                className="text-slate-500 hover:text-slate-700 p-1"
+                onClick={closeFreeFormModal}
+                aria-label="סגירה"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <LabeledInput
+                  label="שם התוספת"
+                  value={newFreeFormDraft.name}
+                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, name: v })}
+                />
+                <LabeledInput
+                  label="מחיר ליח׳"
+                  value={newFreeFormDraft.price}
+                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, price: v })}
+                  inputMode="numeric"
+                />
+                <LabeledQuantityInput
+                  label="כמות"
+                  value={newFreeFormDraft.qty}
+                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, qty: v })}
+                />
+              </div>
+              <div className="flex flex-wrap gap-2 pt-2 border-t">
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95 disabled:opacity-50"
+                  disabled={!newFreeFormDraft.name.trim() || !newFreeFormDraft.price.trim() || !newFreeFormDraft.qty.trim()}
+                  onClick={() => {
+                    updateCurrent("freeFormAdditions", [
+                      ...state.current.freeFormAdditions,
+                      {
+                        id: uuid(),
+                        name: newFreeFormDraft.name.trim(),
+                        price: newFreeFormDraft.price.trim(),
+                        qty: newFreeFormDraft.qty.trim(),
+                      },
+                    ]);
+                    closeFreeFormModal();
+                  }}
+                >
+                  הוסף להצעה
+                </button>
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
+                  onClick={closeFreeFormModal}
+                >
+                  ביטול
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Items Table + totals + save/export */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
@@ -1071,7 +1166,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
               </tr>
             </thead>
             <tbody>
-              {state.current.items.length === 0 ? (
+              {state.current.items.length === 0 && state.current.freeFormAdditions.length === 0 ? (
                 <tr>
                   <td
                     colSpan={9}
@@ -1323,10 +1418,121 @@ const QuotePage: React.FC<QuotePageProps> = ({
                   );
                 })
               )}
+              {state.current.freeFormAdditions.map((add, addIdx) => {
+                const price = parseLooseNumber(add.price);
+                const qty = Math.max(0, parseLooseNumber(add.qty));
+                const total = price * qty;
+                const totalWithVat = total * (1 + taxDecimal);
+                const isEditing = (f: "name" | "price" | "qty") =>
+                  editingFreeFormCell?.id === add.id && editingFreeFormCell?.field === f;
+                const startEdit = (field: "name" | "price" | "qty") => {
+                  setEditingFreeFormCell({ id: add.id, field });
+                  setEditingFreeFormValue(add[field] || "");
+                };
+                const commitFreeForm = (field: "name" | "price" | "qty") => {
+                  if (!editingFreeFormCell || editingFreeFormCell.id !== add.id || editingFreeFormCell.field !== field) return;
+                  onUpdateFreeFormAddition(add.id, { ...add, [field]: editingFreeFormValue });
+                  setEditingFreeFormCell(null);
+                };
+                return (
+                  <tr
+                    key={add.id}
+                    data-drag-row="freeform"
+                    data-freeform-id={add.id}
+                    className={`border-b bg-amber-50/40 ${dragState?.type === "freeform" && dragState?.id === add.id ? "opacity-50" : ""}`}
+                  >
+                    <Td>
+                      <div
+                        className="flex items-center gap-2 cursor-grab active:cursor-grabbing select-none"
+                        title="גרור לסידור מחדש (בין התוספות)"
+                        onPointerDown={(e) => {
+                          if (e.button !== 0) return;
+                          setDragState({ type: "freeform", id: add.id, label: add.name || `תוספת ${addIdx + 1}` });
+                          setDragPreviewPos({ x: e.clientX, y: e.clientY });
+                        }}
+                      >
+                        <span className="text-slate-400 hover:text-slate-600">⋮⋮</span>
+                        <span>{state.current.items.length + addIdx + 1}</span>
+                      </div>
+                    </Td>
+                    <Td className="td-wrap-col">
+                      <span className="inline-block rounded-md border border-amber-200 bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                        {ADDITION_PROFILE_LABEL}
+                      </span>
+                    </Td>
+                    <Td className="td-nowrap-col">{null}</Td>
+                    <Td className="td-wrap-col">{null}</Td>
+                    <Td className="td-details-col">
+                      {isEditing("name") ? (
+                        <EditableCellInput
+                          value={editingFreeFormValue}
+                          onChange={setEditingFreeFormValue}
+                          onCommit={() => commitFreeForm("name")}
+                          onCancel={() => setEditingFreeFormCell(null)}
+                        />
+                      ) : (
+                        <EditableCellButton onClick={() => startEdit("name")} title="לחץ לעריכה">
+                          {add.name}
+                        </EditableCellButton>
+                      )}
+                    </Td>
+                    <Td className="td-keep-together">
+                      {isEditing("price") ? (
+                        <EditableCellInput
+                          value={editingFreeFormValue}
+                          onChange={setEditingFreeFormValue}
+                          onCommit={() => commitFreeForm("price")}
+                          onCancel={() => setEditingFreeFormCell(null)}
+                          inputMode="numeric"
+                        />
+                      ) : (
+                        <EditableCellButton onClick={() => startEdit("price")} title="לחץ לעריכה">
+                          {fmtCurrency.format(price)}
+                        </EditableCellButton>
+                      )}
+                    </Td>
+                    <Td className="td-keep-together">
+                      {isEditing("qty") ? (
+                        <EditableCellInput
+                          value={editingFreeFormValue}
+                          onChange={setEditingFreeFormValue}
+                          onCommit={() => commitFreeForm("qty")}
+                          onCancel={() => setEditingFreeFormCell(null)}
+                          inputMode="numeric"
+                        />
+                      ) : (
+                        <EditableCellButton onClick={() => startEdit("qty")} title="לחץ לעריכה">
+                          {fmtNumber.format(qty)}
+                        </EditableCellButton>
+                      )}
+                    </Td>
+                    <Td className="font-medium td-keep-together">
+                      <div className="flex flex-col items-end gap-0.5">
+                        <span>{fmtCurrency.format(total)}</span>
+                        {!state.current.showTotals && (
+                          <span className="text-xs text-slate-500 whitespace-normal">
+                            סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
+                          </span>
+                        )}
+                      </div>
+                    </Td>
+                    <Td className="td-keep-together">
+                      <button
+                        className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
+                        onClick={() => onRemoveFreeFormAddition(add.id)}
+                        aria-label="מחק תוספת"
+                        title="מחק"
+                      >
+                        מחיקה
+                      </button>
+                    </Td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex justify-end gap-2 flex-wrap">
           <button
             type="button"
             className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95 inline-flex items-center gap-2 text-sm font-medium"
@@ -1339,234 +1545,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
             <span className="text-lg leading-none">+</span>
             הוסף פריט
           </button>
-        </div>
-
-        {/* Free-form additions — gentle continuation of פריטי ההצעה */}
-        <div className="mt-3 pt-3 border-t border-slate-200">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-base font-medium text-slate-700">
-              תוספות חופשיות
-              {state.current.freeFormAdditions.length > 0 && (
-                <span className="text-slate-500 font-normal mr-1">
-                  ({state.current.freeFormAdditions.length})
-                </span>
-              )}
-            </span>
-          </div>
-
-          {/* Input form for new free-form addition */}
-          {showFreeFormInput && (
-            <div className="mb-3 p-3 border border-slate-200 rounded-lg bg-slate-50/80">
-              <h3 className="text-sm font-medium text-slate-700 mb-2">הוספת תוספת חופשית</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
-                <LabeledInput
-                  label="שם התוספת"
-                  value={newFreeFormDraft.name}
-                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, name: v })}
-                />
-                <LabeledInput
-                  label="מחיר"
-                  value={newFreeFormDraft.price}
-                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, price: v })}
-                  inputMode="numeric"
-                />
-                <LabeledQuantityInput
-                  label="כמות"
-                  value={newFreeFormDraft.qty}
-                  onChange={(v) => setNewFreeFormDraft({ ...newFreeFormDraft, qty: v })}
-                />
-              </div>
-              <div className="flex gap-2">
-                <button
-                  className="px-3 py-1.5 rounded-lg bg-sky-500 text-white text-sm hover:opacity-95"
-                  onClick={() => {
-                    if (newFreeFormDraft.name.trim() && newFreeFormDraft.price.trim() && newFreeFormDraft.qty.trim()) {
-                      // Create the addition directly with the form data
-                      const newAddition = {
-                        id: uuid(),
-                        name: newFreeFormDraft.name.trim(),
-                        price: newFreeFormDraft.price.trim(),
-                        qty: newFreeFormDraft.qty.trim(),
-                      };
-                      // Add it to the state directly
-                      updateCurrent("freeFormAdditions", [...state.current.freeFormAdditions, newAddition]);
-                      setNewFreeFormDraft({ name: "", price: "0", qty: "1" });
-                      setShowFreeFormInput(false);
-                    }
-                  }}
-                >
-                  שמור והוסף
-                </button>
-                <button
-                  className="px-3 py-1.5 rounded-lg bg-white border text-sm hover:bg-slate-50"
-                  onClick={() => {
-                    setShowFreeFormInput(false);
-                    setNewFreeFormDraft({ name: "", price: "0", qty: "1" });
-                  }}
-                >
-                  ביטול
-                </button>
-              </div>
-            </div>
-          )}
-          <div className="table-scroll">
-            <table className="table-inner-min table-quote-items w-full text-sm">
-              <thead>
-                <tr className="border-b bg-slate-50">
-                  <Th>מס׳</Th>
-                  <Th className="td-wrap-col">שם התוספת</Th>
-                  <Th>מחיר ליח׳</Th>
-                  <Th>כמות</Th>
-                  <Th>סה״כ</Th>
-                  <Th>פעולות</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {state.current.freeFormAdditions.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={6}
-                      className="text-center py-6 text-slate-500"
-                    >
-                      אין תוספות חופשיות עדיין
-                    </td>
-                  </tr>
-                ) : (
-                  state.current.freeFormAdditions.map((add, idx) => {
-                    const price = parseLooseNumber(add.price);
-                    const qty = Math.max(0, parseLooseNumber(add.qty));
-                    const total = price * qty;
-                    const totalWithVat = total * (1 + taxDecimal);
-                    const isEditing = (f: "name" | "price" | "qty") =>
-                      editingFreeFormCell?.id === add.id && editingFreeFormCell?.field === f;
-                    const commitFreeForm = (field: "name" | "price" | "qty") => {
-                      if (!editingFreeFormCell || editingFreeFormCell.id !== add.id || editingFreeFormCell.field !== field) return;
-                      const updated = { ...add, [field]: editingFreeFormValue };
-                      onUpdateFreeFormAddition(add.id, updated);
-                      setEditingFreeFormCell(null);
-                    };
-                    return (
-                      <tr
-                        key={add.id}
-                        data-drag-row="freeform"
-                        data-freeform-id={add.id}
-                        className={`border-b ${dragState?.type === "freeform" && dragState?.id === add.id ? "opacity-50" : ""}`}
-                      >
-                        <Td>
-                          <div
-                            className="flex items-center gap-2 cursor-grab active:cursor-grabbing select-none"
-                            title="גרור לסידור מחדש"
-                            onPointerDown={(e) => {
-                              if (e.button !== 0) return;
-                              setDragState({ type: "freeform", id: add.id, label: add.name || `תוספת ${idx + 1}` });
-                              setDragPreviewPos({ x: e.clientX, y: e.clientY });
-                            }}
-                          >
-                            <span className="text-slate-400 hover:text-slate-600">⋮⋮</span>
-                            <span>{idx + 1}</span>
-                          </div>
-                        </Td>
-                        <Td className="td-wrap-col">
-                          {isEditing("name") ? (
-                            <EditableCellInput
-                              value={editingFreeFormValue}
-                              onChange={setEditingFreeFormValue}
-                              onCommit={() => commitFreeForm("name")}
-                              onCancel={() => setEditingFreeFormCell(null)}
-                            />
-                          ) : (
-                            <EditableCellButton
-                              onClick={() => {
-                                setEditingFreeFormCell({ id: add.id, field: "name" });
-                                setEditingFreeFormValue(add.name || "");
-                              }}
-                              title="לחץ לעריכה"
-                            >
-                              {add.name || "\u00A0"}
-                            </EditableCellButton>
-                          )}
-                        </Td>
-                        <Td className="td-keep-together">
-                          {isEditing("price") ? (
-                            <EditableCellInput
-                              value={editingFreeFormValue}
-                              onChange={setEditingFreeFormValue}
-                              onCommit={() => commitFreeForm("price")}
-                              onCancel={() => setEditingFreeFormCell(null)}
-                              inputMode="numeric"
-                            />
-                          ) : (
-                            <EditableCellButton
-                              onClick={() => {
-                                setEditingFreeFormCell({ id: add.id, field: "price" });
-                                setEditingFreeFormValue(add.price || "");
-                              }}
-                              title="לחץ לעריכה"
-                            >
-                              {fmtCurrency.format(price)}
-                            </EditableCellButton>
-                          )}
-                        </Td>
-                        <Td className="td-keep-together">
-                          {isEditing("qty") ? (
-                            <EditableCellInput
-                              value={editingFreeFormValue}
-                              onChange={setEditingFreeFormValue}
-                              onCommit={() => commitFreeForm("qty")}
-                              onCancel={() => setEditingFreeFormCell(null)}
-                              inputMode="numeric"
-                            />
-                          ) : (
-                            <EditableCellButton
-                              onClick={() => {
-                                setEditingFreeFormCell({ id: add.id, field: "qty" });
-                                setEditingFreeFormValue(add.qty || "");
-                              }}
-                              title="לחץ לעריכה"
-                            >
-                              {fmtNumber.format(qty)}
-                            </EditableCellButton>
-                          )}
-                        </Td>
-                        <Td className="font-medium td-keep-together">
-                          <div className="flex flex-col items-end gap-0.5">
-                            <span>{fmtCurrency.format(total)}</span>
-                            {!state.current.showTotals && (
-                              <span className="text-xs text-slate-500 whitespace-normal">
-                                סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
-                              </span>
-                            )}
-                          </div>
-                        </Td>
-                        <Td className="td-keep-together">
-                          <button
-                            className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-sm font-medium text-red-600 hover:bg-red-100"
-                            onClick={() => onRemoveFreeFormAddition(add.id)}
-                            aria-label="מחק תוספת"
-                            title="מחק"
-                          >
-                            מחיקה
-                          </button>
-                        </Td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="mt-3 flex justify-end">
-            <button
-              type="button"
-              className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95 inline-flex items-center gap-2 text-sm font-medium"
-              onClick={() => setShowFreeFormInput(true)}
-              title="הוסף תוספת חופשית"
-              aria-label="הוסף תוספת"
-            >
-              <span className="text-lg leading-none">+</span>
-              הוסף תוספת
-            </button>
-          </div>
+          <button
+            type="button"
+            className="px-4 py-2 rounded-lg bg-amber-500 text-white hover:opacity-95 inline-flex items-center gap-2 text-sm font-medium"
+            onClick={() => setShowFreeFormInput(true)}
+            title="הוסף תוספת חופשית"
+            aria-label="הוסף תוספת"
+          >
+            <span className="text-lg leading-none">+</span>
+            הוסף תוספת
+          </button>
         </div>
 
         {/* Totals row + toggle for calculating overall totals */}
