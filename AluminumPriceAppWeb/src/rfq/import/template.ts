@@ -11,7 +11,7 @@ function header(field: ImportField): string {
 }
 
 export const TEMPLATE_HEADERS: string[] = IMPORT_FIELDS.filter((f) => f !== "unit").map(header);
-const TEMPLATE_FIELDS: ImportField[] = IMPORT_FIELDS.filter((f) => f !== "unit");
+export const TEMPLATE_FIELDS: ImportField[] = IMPORT_FIELDS.filter((f) => f !== "unit");
 
 type Example = Partial<Record<ImportField, string | number>>;
 
@@ -22,6 +22,8 @@ const EXAMPLES: Example[] = [
   { reference: "W-04", category: "window", openingType: "top hung", width: 800, height: 500, quantity: 3, location: "Bathroom", glass: "Frosted" },
   { reference: "D-01", category: "door", openingType: "sliding door", width: 3600, height: 2300, quantity: 1, location: "Salon", panels: 4, fixedPanels: "1,4", shutter: "yes", hardware: "Lockable handle" },
   { reference: "D-02", category: "דלת", openingType: "דלת שתי כנפיים", width: 1600, height: 2200, quantity: 1, location: "כניסה", swing: "החוצה", activeLeaf: "ימין", notes: "דלת כניסה ראשית" },
+  { reference: "W-05", category: "window", openingType: "casement", width: 3600, height: 1500, quantity: 1, location: "Living room", panels: 6, fixedPanels: "1,6", swing: "inward", glassConstruction: "double", glassTreatment: "tempered", glassAppearance: "clear", glassCoatings: "Low-E", glassMakeup: "6-16-6", cavityFill: "argon", hardwareSet: "yes" },
+  { reference: "W-06", category: "window", openingType: "casement", width: 1500, height: 2000, quantity: 2, location: "Bedroom", layout: "F:400/(OL[G/G]|F|OR)", swing: "inward", glassConstruction: "double", glassAppearance: "clear", shading: "integrated", shadingOperation: "manual", shadingColor: "White", alternatives: "Same layout with triple glazing; Top light as top-hung opening" },
   { reference: "", category: "window", openingType: "custom", width: 2000, height: 1000, quantity: 1, location: "Staircase", description: "Trapezoid fixed window, high side on the left" },
 ];
 
@@ -44,6 +46,20 @@ function instructionRows(): string[][] {
     ["Hinge side / צד צירים", "left / שמאל, right / ימין — viewed from outside / במבט מבחוץ"],
     ["Opening direction / כיוון פתיחה", "inward / פנימה, outward / החוצה"],
     ["Insect screen, Shutter / רשת, תריס", "yes / כן, no / לא, or empty = not specified / ריק = לא צוין"],
+    [
+      "Layout / חלוקה",
+      "Optional; replaces Panels / Fixed panels. | = side by side, / = stacked, ( ) groups. F = fixed panel, O = opening panel, add L or R for hinge side / slide direction. [G/G] = glass divided by glazing bars inside the panel, G#2x1 = decorative bars (2 vertical, 1 horizontal). :400 = size in the row's unit; omitted sizes share the rest equally. Example: F:400/(OL[G/G]|F|OR) / לא חובה; מחליף את מספר החלקים. | = זה לצד זה, / = זה מעל זה. F = קבוע, O = נפתח, L/R = צד. [G/G] = חלוקת זכוכית, G#2x1 = סרגלים דקורטיביים. :400 = מידה ביחידת השורה.",
+    ],
+    ["Glazing construction / מבנה זיגוג", "single / יחיד, double / כפול, triple / משולש, custom / מותאם, ask supplier / לשאול את הספק"],
+    ["Glass treatment / עיבוד זכוכית", "annealed / רגילה, heat strengthened / מחוזקת בחום, tempered / מחוסמת, laminated / שכבתית, tempered laminated / שכבתית מחוסמת, ask supplier"],
+    ["Glass appearance / מראה זכוכית", "clear / שקופה, low iron / אולטרה-שקופה, tinted / כהה (put the color in Glass tint color), reflective / רפלקטיבית, frosted / חלבית, patterned / מעוטרת, custom"],
+    ["Glass coatings / ציפויי זכוכית", "Comma-separated: Low-E, solar control, UV, acoustic, custom / מופרדים בפסיק"],
+    ["Glass make-up (mm) / הרכב זכוכית (מ״מ)", "Always millimetres, regardless of the width/height unit: pane-cavity-pane, e.g. 6-16-6, 4+4-12-6, 6-14-4-14-6. Empty = supplier to propose. / תמיד במ״מ: זכוכית-מרווח-זכוכית. ריק = הספק יציע."],
+    ["Cavity fill / מילוי מרווח", "air / אוויר, argon / ארגון, other / אחר"],
+    ["Blind / shading / וילון / הצללה", "none / ללא, integrated / מובנה, interior / פנימי, exterior / חיצוני, roller shutter / תריס גלילה, other, ask supplier. Integrated blinds need double or triple glazing. / וילון מובנה דורש זיגוג כפול או משולש."],
+    ["Blind operation / הפעלת וילון", "manual / ידני, motorized / חשמלי"],
+    ["Complete hardware set / סט פרזול מלא", "yes / כן to request a complete compatible hardware set / כן לבקשת סט פרזול מלא ותואם"],
+    ["Alternatives / חלופות", "Separate several alternatives with ; — priced separately from the main configuration / מספר חלופות מופרדות ב-;"],
     ["Other columns / עמודות נוספות", "Free text, kept exactly as written (not translated). / טקסט חופשי, נשמר בדיוק כפי שנכתב (ללא תרגום)."],
     ["Limits / מגבלות", "Max 5 MB, 1000 rows. Formulas are not calculated; macros are not supported. / עד 5MB ו-1000 שורות. נוסחאות אינן מחושבות; מאקרו אינו נתמך."],
     ["", ""],

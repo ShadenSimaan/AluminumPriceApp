@@ -1,5 +1,6 @@
 // FILE: src/types.ts
-import type { RfqSettings, SupplierRequest } from "./rfq/types";
+import type { RfqItem, RfqSettings, SupplierRequest } from "./rfq/types";
+import type { PriceBasis } from "./quote/pricing";
 
 /** Document kind for PDF / saved file identity (priced documents only) */
 export type DocumentType = "quote" | "payment_request";
@@ -69,8 +70,16 @@ export type LineItem = {
   unitPrice: string; // from profile by default but editable (price per m²)
   /** When set, used as price per unit directly (no formula). Addons still added. */
   manualUnitPrice?: string;
+  /** per_m2 is the legacy area rate. per_unit charges manualUnitPrice, or unitPrice, once per piece. */
+  priceBasis?: PriceBasis;
   location?: string;
   details?: string;
+  /** Customer-facing product name. Not a supplier cost. */
+  customerDescription?: string;
+  /** Same window model used by בקשה לספק, so the drawing stays consistent. */
+  configuration?: RfqItem;
+  /** Internal only: the drawing is a source image that was not converted into panels. */
+  configurationNeedsReview?: boolean;
   addons: Addon[];
   subtotal: number; // computed
 };
@@ -91,6 +100,13 @@ export type Quote = {
   items: LineItem[];
   freeFormAdditions?: FreeFormAddition[];
   taxPercent: number; // accepts 0.18 or 18
+  /** Percent of the subtotal, taken before VAT. Empty/0 means no discount. */
+  discountPercent?: number;
+  validityText?: string;
+  paymentTerms?: string;
+  installationTerms?: string;
+  /** Running number for הצעת מחיר. Independent from חשבון עסקה. */
+  quoteNumber?: number;
   showTotals?: boolean;
   totals: { sub: number; tax: number; grand: number };
 };
@@ -115,6 +131,11 @@ export type AppCurrentState = {
   items: LineItem[];
   freeFormAdditions: FreeFormAddition[]; // תוספות חופשיות
   taxPercentText: string;
+  discountPercentText: string;
+  validityText: string;
+  paymentTerms: string;
+  installationTerms: string;
+  quoteNumber?: number;
   notes: string;
   /** When false, don't show or calculate overall totals (subtotal/מע״מ/grand) in UI & PDF box */
   showTotals: boolean;
@@ -140,5 +161,7 @@ export type AppState = {
   rfqDraft: SupplierRequest | null;
   /** Next serial for supplier RFQs; independent from payment-request numbering */
   nextSupplierRequestNumber: number;
+  /** Next serial for הצעת מחיר */
+  nextQuoteNumber: number;
   rfqSettings: RfqSettings;
 };

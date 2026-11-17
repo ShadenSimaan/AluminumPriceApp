@@ -54,6 +54,10 @@ export const DEFAULT_STATE: AppState = {
     items: [],
     freeFormAdditions: [],
     taxPercentText: "18",
+    discountPercentText: "",
+    validityText: "",
+    paymentTerms: "",
+    installationTerms: "",
     notes: "",
     showTotals: true,
   },
@@ -64,6 +68,7 @@ export const DEFAULT_STATE: AppState = {
   supplierRequests: [],
   rfqDraft: null,
   nextSupplierRequestNumber: 1,
+  nextQuoteNumber: 1,
   rfqSettings: DEFAULT_RFQ_SETTINGS,
 };
 
@@ -118,12 +123,21 @@ export function normalizeState(obj: unknown): AppState {
     items: Array.isArray(currentRaw.items) ? currentRaw.items : [],
     freeFormAdditions: Array.isArray(currentRaw.freeFormAdditions) ? currentRaw.freeFormAdditions : [],
     taxPercentText: String(currentRaw.taxPercentText ?? "18"),
+    discountPercentText: String(currentRaw.discountPercentText ?? ""),
+    validityText: String(currentRaw.validityText ?? ""),
+    paymentTerms: String(currentRaw.paymentTerms ?? ""),
+    installationTerms: String(currentRaw.installationTerms ?? ""),
+    quoteNumber:
+      typeof currentRaw.quoteNumber === "number" && currentRaw.quoteNumber > 0
+        ? Math.floor(currentRaw.quoteNumber)
+        : undefined,
     notes: String(currentRaw.notes ?? ""),
     showTotals: currentRaw.showTotals !== false,
   };
   const uiRaw: any = o.ui ?? {};
+  // Legacy "supplier_import" tab is gone — quotation prices are imported on בקשה לספק.
   const tab: AppState["ui"]["tab"] =
-    uiRaw.tab === "customers" ? "customers" : uiRaw.tab === "rfq" ? "rfq" : "quote";
+    uiRaw.tab === "customers" ? "customers" : uiRaw.tab === "rfq" || uiRaw.tab === "supplier_import" ? "rfq" : "quote";
   const ui = {
     tab,
     settingsOpen: Boolean(uiRaw.settingsOpen ?? false),
@@ -154,6 +168,8 @@ export function normalizeState(obj: unknown): AppState {
     pdfSaveFolder,
     dimensionUnit,
     nextPaymentRequestNumber,
+    nextQuoteNumber:
+      typeof o.nextQuoteNumber === "number" && o.nextQuoteNumber > 0 ? Math.floor(o.nextQuoteNumber) : 1,
     ...normalizeRfqSlice(o as Record<string, unknown>),
   };
 }

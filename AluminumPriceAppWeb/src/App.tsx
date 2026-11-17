@@ -5,11 +5,18 @@ import { exportQuotePdf, openPdfSaveFolder, printQuotePdf } from "./pdfExporter"
 import { AppCurrentState, AppState, Customer, LineItem, Profile, FreeFormAddition, Addon, Quote, documentTypeLabel, normalizeDocumentType } from "./types";
 import { readStateFromFile, writeStateToFile, isTauri, getDataFilePath } from "./storage";
 import QuotePage from "./QuotePage";
+import CompanyLogo from "./brand/CompanyLogo";
 import CustomersPage from "./CustomersPage";
 import type { RfqSlice } from "./rfq/rfqState";
 import { DEFAULT_STATE, normalizeState, uuid } from "./appState";
 import { confirmDestructive } from "./confirmDialog";
 import { applyCustomerImport, type DraftRow } from "./customers/customerImport";
+import { quoteMoney } from "./quote/pricing";
+import { duplicateLineItem, remapQuoteItems, withSubtotal } from "./quote/windowLine";
+import { toCustomerPdfPayload } from "./quote/customerPayload";
+import type { SupplierRequest } from "./rfq/types";
+import { buildCustomerQuoteFromRfq, type ConvertToQuoteOptions } from "./rfq/toCustomerQuote";
+import { dict, fmt } from "./rfq/i18n";
 
 /** =========================
  *  Constants & Utilities
@@ -72,6 +79,10 @@ function emptyCurrentState(): AppCurrentState {
     freeFormAdditions: [],
     notes: "",
     taxPercentText: "18",
+    discountPercentText: "",
+    validityText: "",
+    paymentTerms: "",
+    installationTerms: "",
     showTotals: true,
   };
 }
@@ -166,6 +177,11 @@ function normalizeLineItemForCompare(it: LineItem) {
     profileName: it.profileName ?? "",
     unitPrice: it.unitPrice,
     manualUnitPrice: it.manualUnitPrice ?? "",
+    priceBasis: it.priceBasis ?? "",
+    customerDescription: it.customerDescription ?? "",
+    configurationRef: it.configuration?.reference ?? "",
+    configurationOpening: it.configuration?.openingType ?? "",
+    configurationLayout: it.configuration ? JSON.stringify(it.configuration.layout) : "",
     location: it.location ?? "",
     details: it.details ?? "",
     subtotal: roundMoney(it.subtotal),
@@ -207,6 +223,11 @@ function buildQuoteContentSnapshotFromCurrent(current: AppCurrentState) {
     items: current.items.map(normalizeLineItemForCompare),
     freeFormAdditions: current.freeFormAdditions.map(normalizeFreeFormAdditionForCompare),
     taxPercent: parseLooseNumber(current.taxPercentText ?? "18"),
+    discountPercent: parseLooseNumber(current.discountPercentText ?? ""),
+    validityText: current.validityText ?? "",
+    paymentTerms: current.paymentTerms ?? "",
+    installationTerms: current.installationTerms ?? "",
+    quoteNumber: current.quoteNumber ?? null,
     showTotals: current.showTotals !== false,
   };
 }
@@ -223,6 +244,11 @@ function buildQuoteContentSnapshotFromQuote(q: Quote) {
     items: (q.items ?? []).map(normalizeLineItemForCompare),
     freeFormAdditions: (q.freeFormAdditions ?? []).map(normalizeFreeFormAdditionForCompare),
     taxPercent: q.taxPercent,
+    discountPercent: q.discountPercent ?? 0,
+    validityText: q.validityText ?? "",
+    paymentTerms: q.paymentTerms ?? "",
+    installationTerms: q.installationTerms ?? "",
+    quoteNumber: q.quoteNumber ?? null,
     showTotals: q.showTotals !== false,
   };
 }
@@ -262,22 +288,13 @@ function saveQuoteToState(
     s.current.customerNotes
   );
 
-  const subTotalItemsLocal = withCustomer.current.items.reduce(
-    (a, it) => a + it.subtotal,
-    0
-  );
-  const subTotalFreeFormLocal = withCustomer.current.freeFormAdditions.reduce((sum, add) => {
-    const price = parseLooseNumber(add.price);
-    const qty = Math.max(0, parseLooseNumber(add.qty));
-    return sum + price * qty;
-  }, 0);
-  const subTotalLocal = subTotalItemsLocal + subTotalFreeFormLocal;
-  const taxDecimalLocal = normalizeTaxPercent(
-    parseLooseNumber(withCustomer.current.taxPercentText ?? "18")
-  );
-  const taxValueLocal = subTotalLocal * taxDecimalLocal;
-  const grandTotalLocal = subTotalLocal + taxValueLocal;
-  const totals = { sub: subTotalLocal, tax: taxValueLocal, grand: grandTotalLocal };
+  const money = quoteMoney({
+    lines: withCustomer.current.items,
+    freeForm: withCustomer.current.freeFormAdditions,
+    taxPercentText: withCustomer.current.taxPercentText ?? "18",
+    discountPercentText: withCustomer.current.discountPercentText,
+  });
+  const totals = { sub: money.sub, tax: money.tax, grand: money.grand };
   const currentQuoteId = withCustomer.current.quoteId;
   const currentContent = JSON.stringify(buildQuoteContentSnapshotFromCurrent(withCustomer.current));
   // Documents opened before quotes had ids are matched by content so they don't become duplicates.
@@ -294,7 +311,7 @@ function saveQuoteToState(
     withCustomer.current,
     profilesSignature
   );
-  const quoteDate = quoteUnchanged && existingQuote ? existingQuote.date : Date.now();
+  let quoteDate = quoteUnchanged && existingQuote ? existingQuote.date : Date.now();
 
   const documentType = normalizeDocumentType(withCustomer.current.documentType);
   let nextPaymentRequestNumber =
@@ -309,6 +326,21 @@ function saveQuoteToState(
       : existingQuote?.documentNumber && existingQuote.documentNumber > 0
         ? Math.floor(existingQuote.documentNumber)
         : undefined;
+  let nextQuoteNumber =
+    typeof withCustomer.nextQuoteNumber === "number" && withCustomer.nextQuoteNumber > 0
+      ? Math.floor(withCustomer.nextQuoteNumber)
+      : 1;
+  let quoteNumber =
+    typeof withCustomer.current.quoteNumber === "number" && withCustomer.current.quoteNumber > 0
+      ? Math.floor(withCustomer.current.quoteNumber)
+      : existingQuote?.quoteNumber && existingQuote.quoteNumber > 0
+        ? Math.floor(existingQuote.quoteNumber)
+        : undefined;
+  if (documentType === "quote" && quoteNumber == null) {
+    quoteNumber = nextQuoteNumber;
+    nextQuoteNumber += 1;
+    quoteUnchanged = false;
+  }
 
   if (documentType === "payment_request") {
     if (documentNumber == null) {
@@ -334,6 +366,11 @@ function saveQuoteToState(
     items: withCustomer.current.items,
     freeFormAdditions: withCustomer.current.freeFormAdditions,
     taxPercent: parseLooseNumber(withCustomer.current.taxPercentText ?? "18"),
+    discountPercent: parseLooseNumber(withCustomer.current.discountPercentText ?? ""),
+    validityText: withCustomer.current.validityText,
+    paymentTerms: withCustomer.current.paymentTerms,
+    installationTerms: withCustomer.current.installationTerms,
+    quoteNumber: documentType === "quote" ? quoteNumber : existingQuote?.quoteNumber,
     showTotals: withCustomer.current.showTotals,
     totals,
   };
@@ -341,12 +378,14 @@ function saveQuoteToState(
   const nextState: AppState = {
     ...withCustomer,
     nextPaymentRequestNumber,
+    nextQuoteNumber,
     current: {
       ...withCustomer.current,
       quoteId: quote.id,
       title: documentTypeLabel(documentType),
       documentType,
       documentNumber: documentType === "payment_request" ? documentNumber : withCustomer.current.documentNumber,
+      quoteNumber,
     },
     quotes: [...withCustomer.quotes.filter((q) => q.id !== quote.id), quote],
   };
@@ -503,39 +542,52 @@ export default function App() {
     []
   );
 
-  function addItem(currentDraft: LineItem) {
-    const widthCm = currentDraft.widthCm ?? "";
-    const heightCm = currentDraft.heightCm ?? "";
-    const qtyText = currentDraft.qty ?? "";
-    const unitPriceText = currentDraft.unitPrice ?? "0";
-    const manualUnitPriceText = (currentDraft.manualUnitPrice ?? "").trim();
-    const w = parseLooseNumber(widthCm);
-    const h = parseLooseNumber(heightCm);
-    const qty = Math.max(0, parseLooseNumber(qtyText));
-    const area = (w * h) / 10000; // m²
-    const addonsPerItem = (currentDraft.addons ?? []).reduce(
-      (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
-      0
-    );
-    const perItemPrice = manualUnitPriceText
-      ? parseLooseNumber(manualUnitPriceText) + addonsPerItem
-      : parseLooseNumber(unitPriceText) * area + addonsPerItem;
-    const subtotal = perItemPrice * qty;
+  function addConfiguredLines(lines: LineItem[]) {
+    setState((s) => {
+      const withItem: AppState = {
+        ...s,
+        current: { ...s.current, items: [...s.current.items, ...lines.map(withSubtotal)] },
+      };
+      if (!withItem.current.customerName.trim()) return withItem;
+      return saveQuoteToState(withItem).nextState;
+    });
+  }
 
-    const item: LineItem = {
+  function duplicateItem(id: string) {
+    setState((s) => {
+      const source = s.current.items.find((item) => item.id === id);
+      if (!source) return s;
+      const copy = duplicateLineItem(source);
+      const index = s.current.items.findIndex((item) => item.id === id);
+      const items = [...s.current.items];
+      items.splice(index + 1, 0, copy);
+      return { ...s, current: { ...s.current, items } };
+    });
+  }
+
+  /** Swap profiles across the whole quotation; prices recalculate from the target catalog rates. */
+  function remapQuoteProfiles(mapping: Record<string, string>) {
+    setState((s) => {
+      const items = remapQuoteItems(s.current.items, mapping, s.profiles);
+      return { ...s, current: { ...s.current, items } };
+    });
+    showToast("הפרופילים עודכנו בהצעה. המחירים חושבו מחדש.", "success");
+  }
+
+  function addItem(currentDraft: LineItem) {
+    const item = withSubtotal({
+      ...currentDraft,
       id: uuid(),
-      widthCm,
-      heightCm,
-      qty: qtyText,
-      profileId: currentDraft.profileId,
-      profileName: currentDraft.profileName,
-      unitPrice: unitPriceText,
-      manualUnitPrice: manualUnitPriceText || undefined,
+      widthCm: currentDraft.widthCm ?? "",
+      heightCm: currentDraft.heightCm ?? "",
+      qty: currentDraft.qty ?? "",
+      unitPrice: currentDraft.unitPrice ?? "0",
+      manualUnitPrice: (currentDraft.manualUnitPrice ?? "").trim() || undefined,
       location: currentDraft.location ?? "",
       details: currentDraft.details ?? "",
       addons: (currentDraft.addons ?? []).map((a) => ({ ...a })),
-      subtotal,
-    };
+      subtotal: 0,
+    });
 
     // Update state + auto-save quote (if there is a customer name)
     setState((s) => {
@@ -590,7 +642,7 @@ export default function App() {
       ...s,
       current: {
         ...s.current,
-        items: s.current.items.map((it) => (it.id === id ? updated : it)),
+        items: s.current.items.map((it) => (it.id === id ? withSubtotal(updated) : it)),
       },
     }));
   }, []);
@@ -753,6 +805,39 @@ export default function App() {
     openQuote(q.id);
   }
 
+  function convertRfqToCustomerQuote(draft: SupplierRequest, opts: ConvertToQuoteOptions) {
+    const built = buildCustomerQuoteFromRfq(draft, opts, state.addons);
+    if (!built.items.length) {
+      showToast(dict(state.rfqSettings.uiLanguage).ui.convertNeedsPrices, "error");
+      return;
+    }
+    setState((prev) => {
+      const savedPrev = saveQuoteToState(prev).nextState;
+      const withDraft: AppState = {
+        ...savedPrev,
+        ui: { ...savedPrev.ui, tab: "quote" },
+        current: {
+          ...emptyCurrentState(),
+          customerName: opts.customerName,
+          customerPhone: opts.customerPhone ?? "",
+          customerEmail: opts.customerEmail ?? "",
+          customerNotes: "",
+          title: documentTypeLabel("quote"),
+          documentType: "quote",
+          items: built.items,
+          freeFormAdditions: built.freeFormAdditions,
+          taxPercentText: savedPrev.current.taxPercentText || "18",
+          notes: opts.notes ?? "",
+          showTotals: true,
+        },
+      };
+      return saveQuoteToState(withDraft).nextState;
+    });
+    clearCurrentForm();
+    setActiveProfileId(undefined);
+    showToast(fmt(dict(state.rfqSettings.uiLanguage).ui.convertQuoteCreated, { name: opts.customerName }), "success");
+  }
+
   function openQuote(quoteId: string) {
     const q = state.quotes.find((x) => x.id === quoteId);
     const customer = q && state.customers.find((c) => c.id === q.customerId);
@@ -779,6 +864,11 @@ export default function App() {
         documentNumber: q.documentNumber,
         freeFormAdditions: (q.freeFormAdditions ?? []).map((add) => ({ ...add, id: uuid() })),
         taxPercentText: String(q.taxPercent ?? "18"),
+        discountPercentText: q.discountPercent != null ? String(q.discountPercent) : "",
+        validityText: q.validityText ?? "",
+        paymentTerms: q.paymentTerms ?? "",
+        installationTerms: q.installationTerms ?? "",
+        quoteNumber: q.quoteNumber,
         notes: q.notes ?? "",
         showTotals: q.showTotals !== false,
       },
@@ -891,23 +981,14 @@ export default function App() {
       }
       setState(nextState);
 
-      const result = await exportQuotePdf({
-        title: nextState.current.title || documentTypeLabel(nextState.current.documentType),
-        documentType: nextState.current.documentType,
-        documentNumber: nextState.current.documentNumber,
-        customerName: nextState.current.customerName,
-        customerPhone: nextState.current.customerPhone,
-        customerEmail: nextState.current.customerEmail,
-        notes: nextState.current.notes,
-        taxPercentText: nextState.current.taxPercentText ?? "18",
-        items: nextState.current.items,
-        freeFormAdditions: nextState.current.freeFormAdditions,
-        pdfSaveFolder: nextState.pdfSaveFolder,
-        dimensionUnit: nextState.dimensionUnit ?? "cm",
-        showTotals: nextState.current.showTotals,
-        pdfDateMs: quote?.date,
-        quoteUnchanged: quoteUnchanged === true,
-      });
+      const result = await exportQuotePdf(
+        toCustomerPdfPayload(nextState.current, {
+          pdfSaveFolder: nextState.pdfSaveFolder,
+          dimensionUnit: nextState.dimensionUnit ?? "cm",
+          pdfDateMs: quote?.date,
+          quoteUnchanged: quoteUnchanged === true,
+        })
+      );
 
       if (result.success === false) {
         showToast(result.error, "error");
@@ -944,22 +1025,13 @@ export default function App() {
       }
       setState(nextState);
 
-      const result = await printQuotePdf({
-        title: nextState.current.title || documentTypeLabel(nextState.current.documentType),
-        documentType: nextState.current.documentType,
-        documentNumber: nextState.current.documentNumber,
-        customerName: nextState.current.customerName,
-        customerPhone: nextState.current.customerPhone,
-        customerEmail: nextState.current.customerEmail,
-        notes: nextState.current.notes,
-        taxPercentText: nextState.current.taxPercentText ?? "18",
-        items: nextState.current.items,
-        freeFormAdditions: nextState.current.freeFormAdditions,
-        pdfSaveFolder: nextState.pdfSaveFolder,
-        dimensionUnit: nextState.dimensionUnit ?? "cm",
-        showTotals: nextState.current.showTotals,
-        pdfDateMs: quote?.date,
-      });
+      const result = await printQuotePdf(
+        toCustomerPdfPayload(nextState.current, {
+          pdfSaveFolder: nextState.pdfSaveFolder,
+          dimensionUnit: nextState.dimensionUnit ?? "cm",
+          pdfDateMs: quote?.date,
+        })
+      );
 
       if (result.success === false) {
         showToast(result.error, "error");
@@ -1307,11 +1379,9 @@ export default function App() {
       <main className="w-full min-w-0 max-w-[1160px] flex flex-col gap-4 px-2">
         {/* Top Bar */}
         <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <div className="h-9 w-9 shrink-0 rounded-xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-md grid place-items-center text-white font-bold">
-              א
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-semibold min-w-0 break-words">
+          <div className="flex items-center gap-3 min-w-0 sm:min-w-fit flex-1">
+            <CompanyLogo size="header" />
+            <h1 className="text-xl sm:text-3xl font-semibold min-w-0 break-words sm:whitespace-nowrap">
               אלום סמעאן סאמי
             </h1>
           </div>
@@ -1419,6 +1489,9 @@ export default function App() {
             dimensionUnit={state.dimensionUnit ?? "cm"}
             onAddProfileQuick={addProfileQuick}
             onUpdateProfileQuick={updateProfileQuick}
+            onAddConfiguredLines={addConfiguredLines}
+            onDuplicateItem={duplicateItem}
+            onRemapQuoteProfiles={remapQuoteProfiles}
           />
         ) : state.ui.tab === "rfq" ? (
           <React.Suspense fallback={<div className="card p-6 text-center text-slate-500">…</div>}>
@@ -1428,6 +1501,7 @@ export default function App() {
               appDimensionUnit={state.dimensionUnit ?? "cm"}
               pdfSaveFolder={state.pdfSaveFolder}
               showToast={showToast}
+              onConvertToCustomerQuote={convertRfqToCustomerQuote}
             />
           </React.Suspense>
         ) : (

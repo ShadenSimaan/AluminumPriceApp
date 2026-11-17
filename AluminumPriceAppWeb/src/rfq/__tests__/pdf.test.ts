@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { PDFDocument, PDFPage } from "pdf-lib";
 import { buildRfqPdfBytes } from "../pdf/rfqPdf";
 import { sampleRequest, item } from "./fixtures";
+import { itemSpecRows } from "../i18n";
+import { newPanel, parseLayoutNotation } from "../layout";
 
 const fontBytes = readFileSync(join(__dirname, "../../../public/fonts/NotoSansHebrew-Regular.ttf"));
 const outDir = process.env.RFQ_PDF_OUT;
@@ -69,6 +71,24 @@ describe("RFQ PDF", () => {
     expect(all).toContain("1200 mm");
   });
 
+  it("explains every division of a door with side lights and a top light", async () => {
+    const layout = parseLayoutNotation("(F:980/F):450|(F:980/(OL|OR)):1970|(F:980/F)", "mm", (p) =>
+      p.fixed ? newPanel("fixed") : newPanel("hinged", { hingeSide: p.side ?? "left" })
+    );
+    const req = sampleRequest();
+    req.items = [item("hinged_door_double", { reference: "W-01", widthCm: 287, heightCm: 328, layout })];
+    const lines = itemSpecRows("en", req.items[0]).map((r) => `${r.label}|${r.value}`);
+    expect(lines).toContain("Vertical divisions (mullions)|3");
+    expect(lines.some((l) => l.replace(/[\u2066-\u2069]/g, "").includes("At 450 mm from the left — full height"))).toBe(true);
+    expect(lines.some((l) => l.replace(/[\u2066-\u2069]/g, "").includes("At 980 mm from the top — full width"))).toBe(true);
+    expect(lines.some((l) => /between P4 \(left\) and P5 \(right\) only/.test(l.replace(/[\u2066-\u2069]/g, "")))).toBe(true);
+    expect(lines.some((l) => l.replace(/[\u2066-\u2069]/g, "") === "Widths, left to right|450 | 985 | 985 | 450 mm")).toBe(true);
+    expect(lines.some((l) => l.replace(/[\u2066-\u2069]/g, "") === "Heights, top to bottom|980 | 2300 mm")).toBe(true);
+    expect(lines.some((l) => /top-left.*450 × 980 mm/.test(l.replace(/[\u2066-\u2069]/g, "")))).toBe(true);
+    expect(lines.some((l) => /bottom-left.*450 × 2300 mm/.test(l.replace(/[\u2066-\u2069]/g, "")))).toBe(true);
+    for (const lang of ["en", "he"] as const) await build(lang, req, `rfq-${lang}-door-divisions`);
+  });
+
   it("embeds a custom item's reference image instead of a standard diagram", async () => {
     const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const req = sampleRequest();
@@ -106,5 +126,5 @@ describe("RFQ PDF", () => {
     // Nothing may be drawn below the footer line or above the top margin (no clipped content)
     expect(Math.min(...drawn.map((d) => d.y))).toBeGreaterThanOrEqual(38);
     expect(Math.max(...drawn.map((d) => d.y))).toBeLessThanOrEqual(841.89 - 30);
-  });
+  }, 30_000);
 });

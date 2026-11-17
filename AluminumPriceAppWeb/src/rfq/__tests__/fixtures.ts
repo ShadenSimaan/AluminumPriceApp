@@ -1,23 +1,28 @@
 import type { RfqItem, RfqOpeningType, SupplierRequest } from "../types";
-import { createRfqItem } from "../presets";
+import { createRfqItem, normalizeItemConfig, withPanels } from "../presets";
 import { createSupplierRequest } from "../rfqState";
+import { accessoryFromLegacyScreen } from "../accessories";
 
 let n = 0;
 export function item(openingType: RfqOpeningType, patch: Partial<RfqItem> = {}): RfqItem {
   n += 1;
-  return { ...createRfqItem({ id: `it-${n}`, openingType, unit: "mm", reference: `X-${n}` }), ...patch };
+  const merged = { ...createRfqItem({ id: `it-${n}`, openingType, unit: "mm", reference: `X-${n}` }), ...patch };
+  // Same migration a saved item gets on load: the legacy insect-screen field becomes an accessory.
+  const screen = patch.insectScreen && !patch.accessories ? accessoryFromLegacyScreen("acc-insect-screen", patch.insectScreen) : null;
+  if (screen) merged.accessories = [screen];
+  return patch.panels && !patch.layout ? withPanels(merged, patch.panels) : normalizeItemConfig(merged);
 }
 
 export function sampleRequest(): SupplierRequest {
   const r = createSupplierRequest({
-    company: { name: "אלום סמעאן סאמי", contactPerson: "Sami Samaan", phone: "0526475531", email: "info@example.com", address: "Fassuta, Israel" },
+    company: { name: "אלום סמעאן סאמי", contactPerson: "Sami Samaan", phone: "0526475531", email: "info@example.com", address: "Fassuta, Israel", website: "" },
     defaultUnit: "mm",
     now: new Date(2026, 9, 25).getTime(),
   });
   r.number = 7;
   r.projectName = "Villa Haddad – וילה חדאד";
   r.projectReference = "PRJ-2026-014";
-  r.supplier = { name: "Foshan Aluminium Co.", contactPerson: "Ms. Li", phone: "+86 757 0000 0000", email: "sales@example.cn", address: "Foshan, Guangdong, China" };
+  r.supplier = { name: "Foshan Aluminium Co.", contactPerson: "Ms. Li", phone: "+86 757 0000 0000", email: "sales@example.cn", address: "Foshan, Guangdong, China", website: "" };
   r.deliveryDestination = "Haifa port, Israel (CIF)";
   r.generalSpecifications =
     "Thermal-break aluminium profiles. Double glazing throughout unless stated otherwise. כל החלונות עם רשת נגד יתושים אם צוין.\nPowder coated RAL 9016 matt.";

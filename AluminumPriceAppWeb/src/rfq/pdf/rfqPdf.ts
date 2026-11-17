@@ -1,14 +1,18 @@
 import { PDFDocument, StandardFonts, rgb, type PDFPage, type RGB } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
-import type { RfqContact, RfqItem, RfqLanguage, SupplierRequest } from "../types";
+import type { RfqContact, RfqItem, RfqLanguage, SupplierQuestion, SupplierRequest } from "../types";
 import { buildDiagram, buildLegendSymbol, type LegendSymbol } from "../diagram";
-import { dict, fmt, itemSpecRows, describeConfigurationShort } from "../i18n";
+import { dict, fmt, itemSpecRows, describeConfigurationShort, type SpecRow } from "../i18n";
+import { isAdvancedLayout } from "../layout";
+import { openQuestions, questionContext, renderTemplate } from "../questions";
 import { totalUnits } from "../presets";
 import { formatDimension } from "../units";
 import { formatRfqNumber } from "../rfqState";
 import { auto, firstStrongRtl, ltr } from "../bidi";
 import { drawLine, wrap, type PdfFonts } from "./pdfText";
 import { drawDiagramPdf, type ImageCache } from "./pdfDiagram";
+import { drawCompanyLogoHeader, embedCompanyLogo } from "../../brand/logoAsset";
+import { eklienLogoKind, isEklienSupplierName, loadEklienLogoBytes } from "../../quote/eklienLogo";
 
 const PAGE_W = 595.28;
 const PAGE_H = 841.89;
@@ -45,6 +49,7 @@ function contactLines(c: RfqContact, d: ReturnType<typeof dict>): { text: string
   if (c.contactPerson.trim()) out.push({ text: `${d.ui.contactPerson}: ${auto(c.contactPerson.trim())}` });
   if (c.phone.trim()) out.push({ text: `${d.ui.phone}: ${ltr(c.phone.trim())}` });
   if (c.email.trim()) out.push({ text: `${d.ui.email}: ${ltr(c.email.trim())}` });
+  if (c.website.trim()) out.push({ text: `${d.pdf.supplierSite}: ${ltr(c.website.trim())}` });
   if (c.address.trim()) out.push({ text: `${d.ui.address}: ${auto(c.address.trim())}` });
   return out;
 }
@@ -68,6 +73,10 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
   };
   const rfqNo = formatRfqNumber(req.number);
   const projectTitle = req.projectName.trim() || d.ui.untitled;
+  // Only open questions go to the supplier; numbering is shared by the item blocks and the questions section.
+  const questions = openQuestions(req);
+  const qNumber = new Map(questions.map((q, i) => [q.id, i + 1]));
+  const qText = (q: SupplierQuestion) => (q.text.trim() ? auto(q.text.trim()) : renderTemplate(lang, q.templateKey, q.params));
   doc.setTitle(`${d.pdf.title} ${rfqNo} ${projectTitle}`.trim());
   doc.setLanguage(rtl ? "he-IL" : "en-GB");
   doc.setCreator("AluPrice");
@@ -164,8 +173,20 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     }
   };
 
+  let supplierBrand: Awaited<ReturnType<typeof embedCompanyLogo>> = null;
+  if (isEklienSupplierName(req.supplier.name) || isEklienSupplierName(req.supplier.contactPerson)) {
+    try {
+      const bytes = await loadEklienLogoBytes();
+      const kind = bytes ? eklienLogoKind(bytes) : null;
+      if (bytes && kind) supplierBrand = kind === "png" ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+    } catch {
+      supplierBrand = null;
+    }
+  }
+
   // ---------- page 1 header ----------
   addPage(false);
+  y = drawCompanyLogoHeader(page, await embedCompanyLogo(doc), y);
   textAt(d.pdf.title, 0, CONTENT_W, y - 20, { size: 20, bold: true, color: ACCENT });
   if (rfqNo) textAt(`${d.pdf.rfqNo} ${ltr(rfqNo)}`, 0, CONTENT_W, y - 12, { size: 10.5, bold: true, align: "end" });
   textAt(`${d.pdf.date}: ${ltr(formatDate(req.requestDate, lang))}`, 0, CONTENT_W, y - 26, { size: 9.5, align: "end" });
@@ -202,6 +223,12 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     const left = boxLeft(off, bw);
     page.drawRectangle({ x: left, y: y - boxH, width: bw, height: boxH, color: FILL_ALT, borderColor: RULE, borderWidth: 0.6 });
     textAt(b.title, off + 8, bw - 16, y - 14, { size: 8.5, bold: true, color: ACCENT });
+    // Supplier "To" box: show EKLIEN mark when this RFQ is addressed to them.
+    if (i === 1 && supplierBrand) {
+      const markH = 14;
+      const markW = (supplierBrand.width / supplierBrand.height) * markH;
+      page.drawImage(supplierBrand, { x: left + bw - markW - 8, y: y - 18, width: markW, height: markH });
+    }
     let ly = y - 28;
     for (const l of wrapped[i].length ? wrapped[i] : [{ text: "—" }]) {
       textAt(l.text, off + 8, bw - 16, ly, { size: 9, bold: l.bold });
@@ -228,6 +255,11 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     }
     y -= h + 10;
   }
+  if (req.items.some((it) => it.openingType !== "custom" && isAdvancedLayout(it.layout))) {
+    paragraph(d.pdf.sizesNote, 8.5, MUTED);
+    paragraph(d.pdf.manufacturability, 8.5, MUTED);
+    y -= 6;
+  }
 
   // Summary: designs vs units, deliberately two separate labelled figures
   {
@@ -250,7 +282,11 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
 
   // Request to supplier
   heading(d.pdf.requestHeading, 11);
-  for (const r of [d.pdf.req1, d.pdf.req2, d.pdf.req3, d.pdf.req4, d.pdf.req5, d.pdf.req6]) {
+  const hasAlternatives = req.items.some((it) => it.alternatives.some((a) => a.description.trim()));
+  const requests = [d.pdf.req1, d.pdf.req2, d.pdf.req3, d.pdf.req4, d.pdf.req5, d.pdf.req6];
+  if (questions.length) requests.push(d.pdf.req7);
+  if (hasAlternatives) requests.push(d.pdf.req8);
+  for (const r of requests) {
     const lines = wrap(r, fonts, 9, CONTENT_W - 16);
     lines.forEach((l, i) => {
       ensure(12.5);
@@ -332,7 +368,8 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
 
   async function drawItemBlock(it: RfqItem) {
     const DW = 220;
-    const DH = 190;
+    const tall = !!(it.widthCm && it.heightCm && it.heightCm > it.widthCm * 1.05);
+    const DH = tall ? 250 : 200;
     const specOff = DW + 16;
     const specW = CONTENT_W - specOff;
     const labelW = 92;
@@ -340,16 +377,28 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     const SS = 8.8;
     const SLH = 11.6;
 
-    const rows: { label: string; value: string; ltr?: boolean; user?: boolean }[] = [
+    const itemQuestions = questions.filter((q) => q.itemId === it.id);
+    const rows: (SpecRow & { ltr?: boolean })[] = [
       { label: d.ui.width, value: `${formatDimension(it.widthCm, it.unit)} ${it.unit}`, ltr: true },
       { label: d.ui.height, value: `${formatDimension(it.heightCm, it.unit)} ${it.unit}`, ltr: true },
       { label: d.pdf.dimensions, value: d.basis[req.dimensionBasis] },
       { label: d.ui.quantity, value: String(it.quantity), ltr: true },
       ...itemSpecRows(lang, it),
+      ...(itemQuestions.length
+        ? [
+            { label: d.pdf.itemQuestions, value: "", heading: true },
+            ...itemQuestions.map((q) => ({ label: `Q${qNumber.get(q.id)}`, value: qText(q) })),
+          ]
+        : []),
     ];
     // Long values are split into chunks so a page break can fall inside them (never off the page).
     const CHUNK = 8;
     const laid = rows.flatMap((r) => {
+      if (r.heading) {
+        const labelLines = wrap(r.label, fonts, SS, specW, true);
+        const valueLines = r.value ? wrap(r.value, fonts, SS - 0.8, specW) : [];
+        return [{ ...r, labelLines, valueLines, sep: false, h: (labelLines.length + valueLines.length) * SLH + 6 }];
+      }
       const labelLines = r.label ? wrap(r.label, fonts, SS, labelW, true) : [];
       const valueLines = r.label ? wrap(r.value, fonts, SS, valueW) : wrap(r.value, fonts, SS, specW - 10);
       const chunks: string[][] = [];
@@ -378,7 +427,7 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     drawBar(false);
     const top = y;
 
-    const spec = buildDiagram(it, { width: DW, height: DH, customPlaceholder: d.pdf.customPlaceholder });
+    const spec = buildDiagram(it, { width: DW, height: DH, customPlaceholder: d.pdf.customPlaceholder, showDivisionDims: true });
     page.drawRectangle({ x: boxLeft(0, DW), y: top - DH, width: DW, height: DH, borderColor: RULE, borderWidth: 0.5 });
     await drawDiagramPdf(doc, page, spec, boxLeft(0, DW), top, fonts, imageCache);
     let cy = top - DH - 10;
@@ -400,14 +449,18 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
         sy = y;
         continued = true;
       }
-      const rowTop = sy;
-      if (r.label) {
+      const rowTop = sy - (r.heading ? 6 : 0);
+      if (r.heading) {
+        r.labelLines.forEach((l, i) => textAt(l, specOff, specW, rowTop - 9 - i * SLH, { size: SS, bold: true, color: ACCENT }));
+        const vTop = rowTop - r.labelLines.length * SLH;
+        r.valueLines.forEach((l, i) => textAt(l, specOff, specW, vTop - 9 - i * SLH, { size: SS - 0.8, color: MUTED }));
+      } else if (r.label) {
         r.labelLines.forEach((l, i) => textAt(l, specOff, labelW, rowTop - 9 - i * SLH, { size: SS, bold: true, color: MUTED }));
         r.valueLines.forEach((l, i) =>
           textAt(l, specOff + labelW + 6, valueW, rowTop - 9 - i * SLH, { size: SS, dir: r.ltr ? "ltr" : r.user ? "auto" : "doc" })
         );
       } else {
-        r.valueLines.forEach((l, i) => textAt(l, specOff + 10, specW - 10, rowTop - 9 - i * SLH, { size: SS }));
+        r.valueLines.forEach((l, i) => textAt(l, specOff + 10, specW - 10, rowTop - 9 - i * SLH, { size: SS, dir: r.user ? "auto" : "doc" }));
       }
       sy -= r.h;
       if (r.sep) {
@@ -432,6 +485,45 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     userParagraphs(req.notes.trim());
   }
 
+  /** A labelled blank line for the supplier to fill in by hand. */
+  const blankField = (label: string, lines = 1) => {
+    const labelLines = wrap(label, fonts, 9, CONTENT_W, true);
+    ensure(labelLines.length * 12 + lines * 18 + 4);
+    for (const l of labelLines) {
+      textAt(l, 0, CONTENT_W, y - 9, { size: 9, bold: true, color: MUTED });
+      y -= 12;
+    }
+    for (let i = 0; i < lines; i++) {
+      y -= 18;
+      rule(y + 3, RULE, 0.5);
+    }
+    y -= 6;
+  };
+
+  // ---------- questions for the supplier ----------
+  if (questions.length) {
+    heading(d.pdf.questions);
+    paragraph(d.pdf.questionsIntro, 8.5, MUTED);
+    y -= 4;
+    for (const q of questions) {
+      const ctx = questionContext(lang, q);
+      const lines = wrap(`Q${qNumber.get(q.id)}${ctx ? ` (${ctx})` : ""}: ${qText(q)}`, fonts, 9, CONTENT_W);
+      ensure(lines.length * 12.5 + 12 + 2 * 18 + 6);
+      for (const l of lines) {
+        textAt(l, 0, CONTENT_W, y - 9, { size: 9 });
+        y -= 12.5;
+      }
+      blankField(d.pdf.reply, 2);
+    }
+  }
+
+  // ---------- supplier response (left blank for the supplier) ----------
+  heading(d.pdf.response);
+  for (const label of [d.pdf.respQuoteRef, d.pdf.respValidity, d.pdf.respLeadTime, d.pdf.respDelivery, d.pdf.respPayment]) blankField(label);
+  blankField(d.pdf.respExclusions, 2);
+  if (hasAlternatives) blankField(d.pdf.respAlternatives, 2);
+  blankField(d.pdf.respSignature);
+
   heading(d.pdf.legend);
   const legend: { symbol: LegendSymbol; text: string }[] = [
     { symbol: "fixed", text: d.ui.legendFixed },
@@ -440,6 +532,10 @@ export async function buildRfqPdfBytes(req: SupplierRequest, opts: RfqPdfOptions
     { symbol: "hinged_in", text: d.ui.legendHingedIn },
     { symbol: "tilt_turn", text: d.ui.legendTilt },
     { symbol: "hinges", text: d.ui.legendHinges },
+    { symbol: "mullion", text: d.ui.legendMullion },
+    { symbol: "glazing_bar", text: d.ui.legendGlazingBar },
+    { symbol: "decorative_bar", text: d.ui.legendDecorative },
+    { symbol: "labels", text: d.ui.legendLabels },
   ];
   for (const e of legend) {
     const lines = wrap(e.text, fonts, 8.8, CONTENT_W - 44);
