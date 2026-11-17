@@ -9,6 +9,16 @@ import {
   DOCUMENT_TYPE_LABELS,
   ADDITION_PROFILE_LABEL,
 } from "./types";
+import { isOpenAreaRate, lineTotal, lineUnitPrice, quoteMoney } from "./quote/pricing";
+import {
+  cloneConfiguration,
+  collectQuoteProfileSources,
+  withSubtotal,
+} from "./quote/windowLine";
+import QuoteProductList from "./quote/QuoteProductList";
+import DocumentHeader from "./brand/DocumentHeader";
+import WindowPicker from "./quote/WindowPicker";
+import RfqItemEditor from "./rfq/RfqItemEditor";
 import {
   Select,
   SelectContent,
@@ -43,37 +53,19 @@ function parseLooseNumber(s: string): number {
 
 /** Same totals logic as App.addItem — used when saving an edited line from the add-item modal. */
 function buildLineItemFromItemEditor(draft: LineItem, id: string): LineItem {
-  const widthCm = draft.widthCm ?? "";
-  const heightCm = draft.heightCm ?? "";
-  const qtyText = draft.qty ?? "";
-  const unitPriceText = draft.unitPrice ?? "0";
-  const manualUnitPriceText = (draft.manualUnitPrice ?? "").trim();
-  const w = parseLooseNumber(widthCm);
-  const h = parseLooseNumber(heightCm);
-  const qty = Math.max(0, parseLooseNumber(qtyText));
-  const area = (w * h) / 10000;
-  const addonsPerItem = (draft.addons ?? []).reduce(
-    (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
-    0
-  );
-  const perItemPrice = manualUnitPriceText
-    ? parseLooseNumber(manualUnitPriceText) + addonsPerItem
-    : parseLooseNumber(unitPriceText) * area + addonsPerItem;
-  const subtotal = perItemPrice * qty;
-  return {
+  return withSubtotal({
+    ...draft,
     id,
-    widthCm,
-    heightCm,
-    qty: qtyText,
-    profileId: draft.profileId,
-    profileName: draft.profileName,
-    unitPrice: unitPriceText,
-    manualUnitPrice: manualUnitPriceText || undefined,
+    widthCm: draft.widthCm ?? "",
+    heightCm: draft.heightCm ?? "",
+    qty: draft.qty ?? "",
+    unitPrice: draft.unitPrice ?? "0",
+    manualUnitPrice: (draft.manualUnitPrice ?? "").trim() || undefined,
     location: draft.location ?? "",
     details: draft.details ?? "",
     addons: (draft.addons ?? []).map((a) => ({ ...a })),
-    subtotal,
-  };
+    subtotal: 0,
+  });
 }
 
 type QuotePageProps = {
@@ -113,6 +105,10 @@ type QuotePageProps = {
   dimensionUnit?: "cm" | "mm";
   onAddProfileQuick?: (name: string, unitPrice: number) => string;
   onUpdateProfileQuick?: (id: string, name: string, unitPrice: number) => void;
+  onAddConfiguredLines?: (items: LineItem[]) => void;
+  onDuplicateItem?: (id: string) => void;
+  /** Map source profile keys → target catalog profile ids for the whole quotation. */
+  onRemapQuoteProfiles?: (mapping: Record<string, string>) => void;
 };
 
 /** Convert stored cm to display value (cm or mm) */
@@ -285,9 +281,17 @@ const QuotePage: React.FC<QuotePageProps> = ({
   dimensionUnit = "cm",
   onAddProfileQuick,
   onUpdateProfileQuick,
+  onAddConfiguredLines,
+  onDuplicateItem,
+  onRemapQuoteProfiles,
 }) => {
   const [editingItemId, setEditingItemId] = React.useState<string | null>(null);
   const [showAddProfileModal, setShowAddProfileModal] = React.useState(false);
+  const [showRemapProfilesModal, setShowRemapProfilesModal] = React.useState(false);
+  /** sourceKey → target profile id; empty / missing means leave unchanged */
+  const [remapDraft, setRemapDraft] = React.useState<Record<string, string>>({});
+  const [remapApplyAllId, setRemapApplyAllId] = React.useState<string>("");
+  const [remapModalContentEl, setRemapModalContentEl] = React.useState<HTMLElement | null>(null);
   /** When set, the profile popup is editing this existing profile; when null, it is add-new mode. */
   const [profileModalEditId, setProfileModalEditId] = React.useState<string | null>(null);
   const [addProfileDraft, setAddProfileDraft] = React.useState({ name: "", unitPrice: "" });
@@ -317,6 +321,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
     label: string;
   } | null>(null);
   const [dragPreviewPos, setDragPreviewPos] = React.useState<{ x: number; y: number } | null>(null);
+  const [windowPickerOpen, setWindowPickerOpen] = React.useState(false);
+  const [drawingEditId, setDrawingEditId] = React.useState<string | null>(null);
   const itemsRef = React.useRef(state.current.items);
   const freeFormRef = React.useRef(state.current.freeFormAdditions);
   itemsRef.current = state.current.items;
@@ -326,6 +332,41 @@ const QuotePage: React.FC<QuotePageProps> = ({
     setShowAddProfileModal(false);
     setProfileModalEditId(null);
     setAddProfileDraft({ name: "", unitPrice: "" });
+  }
+
+  const quoteProfileSources = useMemo(
+    () => collectQuoteProfileSources(state.current.items),
+    [state.current.items]
+  );
+
+  function openRemapProfilesModal() {
+    const initial: Record<string, string> = {};
+    for (const src of collectQuoteProfileSources(state.current.items)) {
+      initial[src.key] = "";
+    }
+    setRemapDraft(initial);
+    setRemapApplyAllId("");
+    setShowRemapProfilesModal(true);
+  }
+
+  function closeRemapProfilesModal() {
+    setShowRemapProfilesModal(false);
+    setRemapDraft({});
+    setRemapApplyAllId("");
+  }
+
+  function commitRemapProfiles() {
+    if (!onRemapQuoteProfiles) return;
+    const mapping: Record<string, string> = {};
+    for (const [key, targetId] of Object.entries(remapDraft)) {
+      if (targetId) mapping[key] = targetId;
+    }
+    if (Object.keys(mapping).length === 0) {
+      closeRemapProfilesModal();
+      return;
+    }
+    onRemapQuoteProfiles(mapping);
+    closeRemapProfilesModal();
   }
 
   function commitProfileModal() {
@@ -447,23 +488,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
   // Auto-save item edits to state (and thus to storage) on every change in the edit modal
   React.useEffect(() => {
     if (!editingItemId || !editDraft) return;
-    const w = parseLooseNumber(editDraft.widthCm);
-    const h = parseLooseNumber(editDraft.heightCm);
-    const qty = Math.max(0, parseLooseNumber(editDraft.qty));
-    const area = (w * h) / 10000;
-    const addonsPerItem = editDraft.addons.reduce(
-      (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
-      0
-    );
     const manual = (editDraft.manualUnitPrice ?? "").trim();
-    const perItemPrice = manual
-      ? parseLooseNumber(manual) + addonsPerItem
-      : area * parseLooseNumber(editDraft.unitPrice) + addonsPerItem;
-    const subtotal = perItemPrice * qty;
     const updated: LineItem = {
       ...editDraft,
       manualUnitPrice: manual || undefined,
-      subtotal,
+      subtotal: lineTotal({ ...editDraft, manualUnitPrice: manual || undefined }),
     };
     onUpdateItem(editingItemId, updated);
   }, [editingItemId, editDraft, onUpdateItem]);
@@ -471,19 +500,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const handleSaveEdit = () => {
     if (!editDraft || !editingItemId) return;
     
-    const w = parseLooseNumber(editDraft.widthCm);
-    const h = parseLooseNumber(editDraft.heightCm);
-    const qty = Math.max(0, parseLooseNumber(editDraft.qty));
-    const area = (w * h) / 10000;
-    const addonsPerItem = editDraft.addons.reduce(
-      (sum, a) => sum + (a.checked ? parseLooseNumber(a.price) : 0),
-      0
-    );
     const manual = (editDraft.manualUnitPrice ?? "").trim();
-    const perItemPrice = manual
-      ? parseLooseNumber(manual) + addonsPerItem
-      : area * parseLooseNumber(editDraft.unitPrice) + addonsPerItem;
-    const subtotal = perItemPrice * qty;
+    const subtotal = lineTotal({ ...editDraft, manualUnitPrice: manual || undefined });
 
     const updated: LineItem = {
       ...editDraft,
@@ -512,14 +530,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
     [itemEditor.addons]
   );
 
-  const livePerItemPrice = useMemo(() => {
-    const manual = (itemEditor.manualUnitPrice ?? "").trim();
-    if (manual) {
-      return parseLooseNumber(manual) + liveAddonsSumPerItem;
-    }
-    const unit = parseLooseNumber(itemEditor.unitPrice);
-    return liveArea * unit + liveAddonsSumPerItem;
-  }, [liveArea, itemEditor.unitPrice, itemEditor.manualUnitPrice, liveAddonsSumPerItem]);
+  const livePerItemPrice = useMemo(() => lineUnitPrice(itemEditor), [itemEditor]);
 
   const liveQty = useMemo(
     () => Math.max(0, parseLooseNumber(itemEditor.qty)),
@@ -530,20 +541,17 @@ const QuotePage: React.FC<QuotePageProps> = ({
     [livePerItemPrice, liveQty]
   );
 
-  const subTotal = useMemo(
-    () => state.current.items.reduce((a, it) => a + it.subtotal, 0),
-    [state.current.items]
+  const priced = useMemo(
+    () =>
+      quoteMoney({
+        lines: state.current.items,
+        freeForm: state.current.freeFormAdditions,
+        taxPercentText: state.current.taxPercentText ?? "18",
+        discountPercentText: state.current.discountPercentText,
+      }),
+    [state.current.items, state.current.freeFormAdditions, state.current.taxPercentText, state.current.discountPercentText]
   );
-
-  const freeFormSubTotal = useMemo(() => {
-    return state.current.freeFormAdditions.reduce((sum, add) => {
-      const price = parseLooseNumber(add.price);
-      const qty = Math.max(0, parseLooseNumber(add.qty));
-      return sum + price * qty;
-    }, 0);
-  }, [state.current.freeFormAdditions]);
-
-  const totalSubTotal = subTotal + freeFormSubTotal;
+  const totalSubTotal = priced.sub;
 
   const taxDecimal = useMemo(() => {
     const raw = state.current.taxPercentText ?? "18";
@@ -553,8 +561,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
     return n;
   }, [state.current.taxPercentText]);
 
-  const taxValue = totalSubTotal * taxDecimal;
-  const grandTotal = totalSubTotal + taxValue;
+  const taxValue = priced.tax;
+  const grandTotal = priced.grand;
 
   const itemsColumnContent = useMemo<ItemsColumnContent>(() => {
     const items = state.current.items;
@@ -636,7 +644,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
       {/* Document type */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-          <h2 className="text-xl font-semibold">סוג מסמך</h2>
+          <DocumentHeader
+            title={DOCUMENT_TYPE_LABELS[state.current.documentType ?? "quote"]}
+            subtitle={
+              state.current.documentType !== "payment_request" && state.current.quoteNumber
+                ? `הצעה מס׳ ${String(state.current.quoteNumber).padStart(4, "0")}`
+                : "סוג מסמך"
+            }
+          />
           <SaveQuoteControl onSave={onSaveQuote} isSaved={isSaved} hasUnsavedChanges={hasUnsavedChanges} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
@@ -731,6 +746,150 @@ const QuotePage: React.FC<QuotePageProps> = ({
           />
         </div>
       </section>
+
+      {/* Remap profiles for the whole quotation */}
+      {showRemapProfilesModal && onRemapQuoteProfiles && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={closeRemapProfilesModal}
+        >
+          <div
+            ref={(el) => el && setRemapModalContentEl(el)}
+            className="bg-white rounded-lg shadow-xl max-w-lg w-full p-4 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold mb-1">החלפת פרופיל בהצעה</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              בחרו פרופיל חדש לפריטים בהצעה — המחיר למ״ר והסיכום יתעדכנו מיד. תוספות חופשיות לא משתנות.
+            </p>
+
+            {quoteProfileSources.length === 0 ? (
+              <p className="text-sm text-slate-500 mb-4">אין פריטים עם פרופיל בהצעה.</p>
+            ) : (
+              <div className="space-y-4">
+                {quoteProfileSources.length > 1 && (
+                  <label className="grid gap-1.5 w-full">
+                    <span className="text-sm text-slate-700">החלף את כל הפרופילים ל־</span>
+                    <Select
+                      value={remapApplyAllId || "__keep__"}
+                      onValueChange={(id) => {
+                        if (id === "__keep__") {
+                          setRemapApplyAllId("");
+                          return;
+                        }
+                        setRemapApplyAllId(id);
+                        setRemapDraft((d) => {
+                          const next = { ...d };
+                          for (const src of quoteProfileSources) next[src.key] = id;
+                          return next;
+                        });
+                      }}
+                    >
+                      <SelectTrigger className="w-full rounded-md bg-white border border-slate-300 px-3 py-2 text-sm">
+                        <SelectValue placeholder="— בחירה מהירה —" />
+                      </SelectTrigger>
+                      <SelectContent portalContainer={remapModalContentEl}>
+                        <SelectItem value="__keep__">— בחירה מהירה —</SelectItem>
+                        {state.profiles.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.name} ({fmtCurrency.format(p.unitPrice)} / מ״ר)
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </label>
+                )}
+
+                <div className="space-y-3">
+                  {quoteProfileSources.map((src) => {
+                    const targetId = remapDraft[src.key] || "";
+                    const target = state.profiles.find((p) => p.id === targetId);
+                    return (
+                      <div
+                        key={src.key}
+                        className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2"
+                      >
+                        <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                          <div className="font-medium text-slate-900">{src.profileName}</div>
+                          <div className="text-xs text-slate-500">
+                            {src.count} פריטים · {fmtCurrency.format(parseLooseNumber(src.currentUnitPrice))} / מ״ר
+                          </div>
+                        </div>
+                        <label className="grid gap-1.5 w-full">
+                          <span className="text-sm text-slate-700">החלף ל־</span>
+                          <Select
+                            value={targetId || "__keep__"}
+                            onValueChange={(id) => {
+                              setRemapApplyAllId("");
+                              setRemapDraft((d) => ({
+                                ...d,
+                                [src.key]: id === "__keep__" ? "" : id,
+                              }));
+                            }}
+                          >
+                            <SelectTrigger className="w-full rounded-md bg-white border border-slate-300 px-3 py-2 text-sm">
+                              <SelectValue placeholder="— ללא שינוי —" />
+                            </SelectTrigger>
+                            <SelectContent portalContainer={remapModalContentEl}>
+                              <SelectItem value="__keep__">— ללא שינוי —</SelectItem>
+                              {state.profiles.map((p) => (
+                                <SelectItem key={p.id} value={p.id}>
+                                  {p.name} ({fmtCurrency.format(p.unitPrice)} / מ״ר)
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </label>
+                        {target && (
+                          <div className="text-xs text-sky-800">
+                            מחיר חדש: {fmtCurrency.format(target.unitPrice)} / מ״ר
+                            {parseLooseNumber(src.currentUnitPrice) !== target.unitPrice && (
+                              <span>
+                                {" "}
+                                (
+                                {target.unitPrice > parseLooseNumber(src.currentUnitPrice) ? "+" : ""}
+                                {fmtCurrency.format(
+                                  target.unitPrice - parseLooseNumber(src.currentUnitPrice)
+                                )}{" "}
+                                למ״ר)
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <p className="text-xs text-slate-500">
+                  מחיר ידני ליחידה (אם הוגדר) יוסר כדי שהמחיר החדש למ״ר ייכנס לחישוב.
+                </p>
+              </div>
+            )}
+
+            <div className="flex gap-2 mt-4 justify-end">
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg bg-white border hover:bg-slate-50"
+                onClick={closeRemapProfilesModal}
+              >
+                ביטול
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg bg-sky-500 text-white hover:opacity-95 disabled:opacity-50"
+                onClick={commitRemapProfiles}
+                disabled={
+                  quoteProfileSources.length === 0 ||
+                  !Object.values(remapDraft).some((id) => Boolean(id))
+                }
+              >
+                החלף ועדכן מחירים
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add profile standalone modal (only when add-item modal is not open) */}
       {showAddProfileModal &&
@@ -1022,10 +1181,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 text-sm">
                 <Stat label="שטח (מ״ר)" value={fmtNumber.format(liveArea)} />
-                <Stat label="תוס׳ ליח׳" value={fmtCurrency.format(liveAddonsSumPerItem)} />
-                <Stat label="מחיר ליח׳" value={fmtCurrency.format(livePerItemPrice)} />
+                <Stat label="תוס׳ ליח׳" amount={liveAddonsSumPerItem} />
+                <Stat label="מחיר ליח׳" amount={livePerItemPrice} />
                 <Stat label="כמות" value={fmtNumber.format(liveQty)} />
-                <Stat label="סה״כ לפריט" value={fmtCurrency.format(liveLineSubtotal)} highlight />
+                <Stat label="סה״כ לפריט" amount={liveLineSubtotal} highlight />
               </div>
               <div className="flex flex-wrap gap-2 pt-2 border-t">
                 <button
@@ -1132,15 +1291,77 @@ const QuotePage: React.FC<QuotePageProps> = ({
         </div>
       )}
 
+      {windowPickerOpen && (
+        <WindowPicker
+          quoteItems={state.current.items}
+          requests={state.supplierRequests}
+          profiles={state.profiles}
+          addons={state.addons}
+          onClose={() => setWindowPickerOpen(false)}
+          onAdd={(items) => {
+            if (onAddConfiguredLines) onAddConfiguredLines(items);
+            else updateCurrent("items", [...state.current.items, ...items]);
+            setWindowPickerOpen(false);
+          }}
+        />
+      )}
+      {drawingEditId && state.current.items.some((item) => item.id === drawingEditId && item.configuration) && (
+        <div className="fixed inset-0 z-50 bg-white overflow-auto p-4" dir="rtl">
+          <RfqItemEditor
+            initial={state.current.items.find((item) => item.id === drawingEditId)!.configuration!}
+            isNew={false}
+            lang="he"
+            otherReferences={state.current.items.flatMap((item) => item.configuration && item.id !== drawingEditId ? [item.configuration.reference] : [])}
+            profile={undefined}
+            askedKeys={[]}
+            confirm={async (message) => window.confirm(message)}
+            saveLabel="שמור בהצעה"
+            onCancel={() => setDrawingEditId(null)}
+            onSave={(configuration) => {
+              const current = state.current.items.find((item) => item.id === drawingEditId);
+              if (current) {
+                onUpdateItem(current.id, withSubtotal({
+                  ...current,
+                  configuration: cloneConfiguration(configuration),
+                  widthCm: configuration.widthCm != null ? String(configuration.widthCm) : current.widthCm,
+                  heightCm: configuration.heightCm != null ? String(configuration.heightCm) : current.heightCm,
+                  qty: String(configuration.quantity || current.qty),
+                  location: configuration.location,
+                  customerDescription: configuration.customDescription || current.customerDescription,
+                  profileName: current.profileName || configuration.frameFinish,
+                  configurationNeedsReview: configuration.openingType === "custom" && Boolean(configuration.referenceImage),
+                }));
+              }
+              setDrawingEditId(null);
+            }}
+          />
+        </div>
+      )}
+
       {/* Items Table + totals + save/export */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
           <h2 className="text-xl font-semibold">
             {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
           </h2>
-          <span className="text-sm text-slate-600 hidden sm:inline">
-            הטבלה נגללת אופקית במסכים קטנים
-          </span>
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-sm text-slate-600 hidden sm:inline">
+              הטבלה נגללת אופקית במסכים קטנים
+            </span>
+            {onRemapQuoteProfiles && state.current.items.length > 0 && (
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg bg-white border border-slate-300 text-slate-800 text-sm hover:bg-slate-50"
+                onClick={openRemapProfilesModal}
+                title="החלף פרופיל לכל הפריטים בהצעה ובדוק איך המחיר משתנה"
+              >
+                החלף פרופיל בהצעה
+              </button>
+            )}
+            <button type="button" className="px-4 py-2 rounded-lg bg-sky-600 text-white text-sm" onClick={() => setWindowPickerOpen(true)}>
+              בחר או הגדר חלון / דלת
+            </button>
+          </div>
         </div>
         <div className="table-scroll" ref={itemsColumns.containerRef}>
           <table
@@ -1179,18 +1400,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 state.current.items.map((it, idx) => {
                   const w = parseLooseNumber(it.widthCm);
                   const h = parseLooseNumber(it.heightCm);
-                  const area = (w * h) / 10000;
                   const addonsSum = it.addons.reduce(
-                    (s, a) =>
-                      s + (a.checked ? parseLooseNumber(a.price) : 0),
+                    (s, a) => s + (a.checked ? parseLooseNumber(a.price) : 0),
                     0
                   );
-                  const manual = (it.manualUnitPrice ?? "").trim();
-                  const perItem = manual
-                    ? parseLooseNumber(manual) + addonsSum
-                    : area * parseLooseNumber(it.unitPrice) + addonsSum;
+                  const rateOnly = isOpenAreaRate(it);
+                  const perItem = rateOnly ? parseLooseNumber(it.unitPrice) : lineUnitPrice(it);
                   const qty = Math.max(0, parseLooseNumber(it.qty));
-                  const total = perItem * qty;
+                  const total = lineTotal(it);
                   const totalWithVat = total * (1 + taxDecimal);
 
                   const addonsText = it.addons
@@ -1258,18 +1475,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
                               const displayH = parts[1] ?? cmToDisplay(h, dimensionUnit);
                               const nw = displayToCm(displayW, dimensionUnit);
                               const nh = displayToCm(displayH, dimensionUnit);
-                              const newArea = (nw * nh) / 10000;
-                              const manual = (it.manualUnitPrice ?? "").trim();
-                              const newPerItem = manual
-                                ? parseLooseNumber(manual) + addonsSum
-                                : newArea * parseLooseNumber(it.unitPrice) + addonsSum;
-                              const newSubtotal = newPerItem * qty;
-                              onUpdateItem(it.id, {
-                                ...it,
-                                widthCm: String(nw),
-                                heightCm: String(nh),
-                                subtotal: newSubtotal,
-                              });
+                              const next = { ...it, widthCm: String(nw), heightCm: String(nh) };
+                              onUpdateItem(it.id, { ...next, subtotal: lineTotal(next) });
                               setEditingCell(null);
                               setEditingValue("");
                             }}
@@ -1285,7 +1492,9 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             }}
                             title={dimensionUnit === "mm" ? "לחץ לעריכה (רוחב×גובה במ״מ)" : "לחץ לעריכה (רוחב×גובה)"}
                           >
-                            {dimensionUnit === "mm"
+                            {rateOnly
+                              ? "—"
+                              : dimensionUnit === "mm"
                               ? `${fmtNumber.format(Math.round(cmToDisplay(w, dimensionUnit)))}×${fmtNumber.format(Math.round(cmToDisplay(h, dimensionUnit)))}`
                               : `${fmtNumber.format(w)}×${fmtNumber.format(h)}`}
                           </EditableCellButton>
@@ -1342,13 +1551,17 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             onCommit={() => {
                               if (!editingValue.trim()) { setEditingCell(null); setEditingValue(""); return; }
                               const num = parseLooseNumber(editingValue);
-                              const newManual = Math.max(0, num - addonsSum);
-                              const newSubtotal = num * qty;
-                              onUpdateItem(it.id, {
-                                ...it,
-                                manualUnitPrice: String(newManual),
-                                subtotal: newSubtotal,
-                              });
+                              if (rateOnly) {
+                                onUpdateItem(it.id, { ...it, unitPrice: String(Math.max(0, num)), manualUnitPrice: "" });
+                              } else {
+                                const newManual = Math.max(0, num - addonsSum);
+                                const newSubtotal = num * qty;
+                                onUpdateItem(it.id, {
+                                  ...it,
+                                  manualUnitPrice: String(newManual),
+                                  subtotal: newSubtotal,
+                                });
+                              }
                               setEditingCell(null);
                               setEditingValue("");
                             }}
@@ -1362,7 +1575,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             }}
                             title="לחץ לעריכת מחיר ליחידה"
                           >
-                            {fmtCurrency.format(perItem)}
+                            {rateOnly ? `${fmtCurrency.format(perItem)} למ״ר` : fmtCurrency.format(perItem)}
                           </EditableCellButton>
                         )}
                       </Td>
@@ -1396,8 +1609,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       </Td>
                       <Td className="font-medium td-keep-together">
                         <div className="flex flex-col items-end gap-0.5">
-                          <span>{fmtCurrency.format(total)}</span>
-                          {!state.current.showTotals && (
+                          <span>{rateOnly ? "—" : fmtCurrency.format(total)}</span>
+                          {!rateOnly && !state.current.showTotals && (
                             <span className="text-xs text-slate-500 whitespace-normal">
                               סה״כ עם מע״מ: {fmtCurrency.format(totalWithVat)}
                             </span>
@@ -1557,10 +1770,20 @@ const QuotePage: React.FC<QuotePageProps> = ({
           </button>
         </div>
 
-        {/* Totals row + toggle for calculating overall totals */}
+        {/* Totals row + toggle — compact layout; money stays LTR so ₪ fits inside each card */}
         <div className="mt-4 flex flex-col gap-3">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <label className="text-sm">הנחה % לפני מע״מ:</label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  className="w-20 rounded-md bg-white border border-slate-300 px-2 py-1.5"
+                  value={state.current.discountPercentText}
+                  onChange={(e) => updateCurrent("discountPercentText", e.target.value)}
+                />
+              </div>
               <div className="flex items-center gap-2">
                 <label className="text-sm">מע״מ (% או עשרוני):</label>
                 <input
@@ -1568,9 +1791,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                   inputMode="numeric"
                   className="w-28 rounded-md bg-white border border-slate-300 px-2 py-1.5"
                   value={state.current.taxPercentText}
-                  onChange={(e) =>
-                    updateCurrent("taxPercentText", e.target.value)
-                  }
+                  onChange={(e) => updateCurrent("taxPercentText", e.target.value)}
                 />
               </div>
               <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -1578,29 +1799,33 @@ const QuotePage: React.FC<QuotePageProps> = ({
                   type="checkbox"
                   className="w-4 h-4"
                   checked={state.current.showTotals}
-                  onChange={(e) =>
-                    updateCurrent("showTotals", e.target.checked)
-                  }
+                  onChange={(e) => updateCurrent("showTotals", e.target.checked)}
                 />
                 <span>חשב והצג סיכום כללי (מחיר, מע״מ, סה״כ)</span>
               </label>
             </div>
             {state.current.showTotals && (
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <Stat label="מחיר" value={fmtCurrency.format(totalSubTotal)} />
-                <Stat label="מע״מ" value={fmtCurrency.format(taxValue)} />
-                <Stat
-                  label="סה״כ לתשלום"
-                  value={fmtCurrency.format(grandTotal)}
-                  highlight
-                />
+              <div
+                className={`grid gap-3 text-sm shrink-0 ${
+                  priced.discount > 0 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"
+                }`}
+              >
+                <Stat label="מחיר" amount={totalSubTotal} />
+                {priced.discount > 0 && <Stat label="הנחה" amount={priced.discount} />}
+                <Stat label="מע״מ" amount={taxValue} />
+                <Stat label="סה״כ לתשלום" amount={grandTotal} highlight />
               </div>
             )}
           </div>
         </div>
 
         {/* Footer notes - moved above date */}
-        <div className="mt-4">
+        <div className="mt-4 grid gap-3">
+          <div className="grid sm:grid-cols-3 gap-3">
+            <LabeledInput label="תוקף ההצעה" value={state.current.validityText} onChange={(v) => updateCurrent("validityText", v)} placeholder="למשל 14 יום" />
+            <LabeledInput label="תנאי תשלום" value={state.current.paymentTerms} onChange={(v) => updateCurrent("paymentTerms", v)} />
+            <LabeledInput label="התקנה" value={state.current.installationTerms} onChange={(v) => updateCurrent("installationTerms", v)} />
+          </div>
           <LabeledInput
             label="הערות למסמך (יופיעו ב-PDF)"
             value={state.current.notes}
@@ -1663,6 +1888,28 @@ const QuotePage: React.FC<QuotePageProps> = ({
             </div>
           )}
         </div>
+      </section>
+
+      <section className="card p-4 w-full">
+        <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+          <h2 className="text-xl font-semibold">מוצרים בהצעה</h2>
+          <span className="text-sm text-slate-600">שרטוט ומפרט לכל חלון ודלת — כך הם מופיעים ב-PDF אחרי טבלת הפריטים</span>
+        </div>
+        <QuoteProductList
+          items={state.current.items}
+          onEditDrawing={(id) => {
+            const item = state.current.items.find((line) => line.id === id);
+            if (!item?.configuration) {
+              setWindowPickerOpen(true);
+              return;
+            }
+            setDrawingEditId(id);
+          }}
+          onDuplicate={(id) => onDuplicateItem?.(id)}
+          onRemove={onRemoveItem}
+          onMoveUp={onMoveItemUp}
+          onMoveDown={onMoveItemDown}
+        />
       </section>
 
       {/* Edit Item Modal */}
@@ -2110,25 +2357,32 @@ function LabeledSelect(props: {
   );
 }
 
+function formatMoneyDisplay(amount: number): string {
+  return `${fmtNumber.format(amount)}\u00A0₪`;
+}
+
 function Stat({
   label,
   value,
+  amount,
   highlight,
 }: {
   label: string;
-  value: string;
+  value?: string;
+  amount?: number;
   highlight?: boolean;
 }) {
+  const display = amount != null ? formatMoneyDisplay(amount) : value ?? "";
   return (
     <div
-      className={`rounded-lg border px-3 py-2 ${
-        highlight
-          ? "bg-emerald-50 border-emerald-200"
-          : "bg-white border-slate-200"
+      className={`rounded-lg border px-3 py-2 min-w-[8.5rem] ${
+        highlight ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200"
       }`}
     >
       <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-sm font-medium">{value}</div>
+      <div className="text-sm font-medium tabular-nums whitespace-nowrap" dir="ltr">
+        {display}
+      </div>
     </div>
   );
 }

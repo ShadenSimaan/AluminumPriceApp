@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildDiagram, type DiagramShape } from "../diagram";
-import { changeOpeningType, createRfqItem, normalizeItemConfig, setPanelCount, validateItem, OPENING_TYPE_DEFS } from "../presets";
+import { changeOpeningType, createRfqItem, setPanelCount, validateItem, withPanels, OPENING_TYPE_DEFS } from "../presets";
 import { cmToUnit, convertUnitValue, formatDimension, parseStrictNumber, unitToCm } from "../units";
 import { RFQ_OPENING_TYPES } from "../types";
 import { item } from "./fixtures";
@@ -56,7 +56,7 @@ describe("diagram configuration", () => {
   it("updates when configuration changes", () => {
     const base = item("casement_window", { panels: [{ operation: "casement", hingeSide: "left" }] });
     const left = buildDiagram(base, opts);
-    const right = buildDiagram(normalizeItemConfig({ ...base, panels: [{ operation: "casement", hingeSide: "right" }] }), opts);
+    const right = buildDiagram(withPanels(base, [{ operation: "casement", hingeSide: "right" }]), opts);
     expect(left).not.toEqual(right);
     const three = buildDiagram(setPanelCount(base, 3), opts);
     expect(three.shapes.length).toBeGreaterThan(left.shapes.length);
@@ -127,11 +127,13 @@ describe("presets offer only valid configurations", () => {
     expect(it.panels.every((p) => p.operation === "fixed")).toBe(true);
   });
 
-  it("clamps panel counts to the type's limits", () => {
+  it("allows any panel count above the type's minimum", () => {
     const def = OPENING_TYPE_DEFS.sliding_window;
-    expect(setPanelCount(item("sliding_window"), 99).panels).toHaveLength(def.maxPanels);
+    expect(setPanelCount(item("sliding_window"), 9).panels).toHaveLength(9);
     expect(setPanelCount(item("sliding_window"), 0).panels).toHaveLength(def.minPanels);
-    expect(setPanelCount(item("hinged_door_single"), 3).panels).toHaveLength(1);
+    const door = setPanelCount(item("hinged_door_single"), 3);
+    expect(door.panels).toHaveLength(3);
+    expect(door.panels.filter((p) => p.operation === "hinged")).toHaveLength(1);
   });
 
   it("requires at least one opening panel for opening types", () => {

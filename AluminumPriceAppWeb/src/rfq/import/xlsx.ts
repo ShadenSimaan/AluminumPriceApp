@@ -47,6 +47,11 @@ function resolvePath(target: string): string {
   return t.startsWith("xl/") ? t : `xl/${t.replace(/^\.\//, "")}`;
 }
 
+/** Drop element namespace prefixes (`<x:row>` → `<row>`) so both default and prefixed OOXML parse. */
+function deNamespace(xml: string): string {
+  return xml.replace(/<\/?([A-Za-z_][\w.-]*):/g, (tag) => tag.replace(/([A-Za-z_][\w.-]*):/, ""));
+}
+
 export function readXlsx(bytes: Uint8Array, maxRows: number): Sheet[] {
   let total = 0;
   const files = unzipSync(bytes, {
@@ -59,8 +64,8 @@ export function readXlsx(bytes: Uint8Array, maxRows: number): Sheet[] {
   });
   const wb = files["xl/workbook.xml"];
   if (!wb) throw new Error("not an Excel workbook (xl/workbook.xml missing)");
-  const workbookXml = strFromU8(wb);
-  const relsXml = files["xl/_rels/workbook.xml.rels"] ? strFromU8(files["xl/_rels/workbook.xml.rels"]) : "";
+  const workbookXml = deNamespace(strFromU8(wb));
+  const relsXml = files["xl/_rels/workbook.xml.rels"] ? deNamespace(strFromU8(files["xl/_rels/workbook.xml.rels"])) : "";
   const rels = new Map<string, string>();
   for (const m of relsXml.matchAll(/<Relationship\b[^>]*>/g)) {
     const id = attr(m[0], "Id");
@@ -70,7 +75,7 @@ export function readXlsx(bytes: Uint8Array, maxRows: number): Sheet[] {
 
   const shared: string[] = [];
   if (files["xl/sharedStrings.xml"]) {
-    const ss = strFromU8(files["xl/sharedStrings.xml"]);
+    const ss = deNamespace(strFromU8(files["xl/sharedStrings.xml"]));
     for (const m of ss.matchAll(/<si>([\s\S]*?)<\/si>|<si\/>/g)) shared.push(textContent(m[1] ?? ""));
   }
 
@@ -82,7 +87,7 @@ export function readXlsx(bytes: Uint8Array, maxRows: number): Sheet[] {
     const path = rels.get(rid) ?? `xl/worksheets/sheet${i + 1}.xml`;
     const data = files[path];
     if (!data) return;
-    sheets.push(parseSheet(name, strFromU8(data), shared, maxRows));
+    sheets.push(parseSheet(name, deNamespace(strFromU8(data)), shared, maxRows));
   });
   return sheets;
 }

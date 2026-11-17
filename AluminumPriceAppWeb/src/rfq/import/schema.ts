@@ -1,4 +1,18 @@
-import type { Requirement, RfqCategory, RfqOpeningType, RfqUnit, Side, Swing } from "../types";
+import type {
+  CavityFill,
+  GlassAppearance,
+  GlassCoating,
+  GlassTreatment,
+  GlazingConstruction,
+  Requirement,
+  RfqCategory,
+  RfqOpeningType,
+  RfqUnit,
+  ShadingOperation,
+  ShadingType,
+  Side,
+  Swing,
+} from "../types";
 
 export type ImportField =
   | "reference"
@@ -21,7 +35,20 @@ export type ImportField =
   | "hardware"
   | "otherRequirements"
   | "description"
-  | "notes";
+  | "notes"
+  | "layout"
+  | "glassConstruction"
+  | "glassTreatment"
+  | "glassAppearance"
+  | "glassTint"
+  | "glassCoatings"
+  | "glassMakeup"
+  | "cavityFill"
+  | "shading"
+  | "shadingOperation"
+  | "shadingColor"
+  | "hardwareSet"
+  | "alternatives";
 
 export const IMPORT_FIELDS: ImportField[] = [
   "reference",
@@ -34,15 +61,28 @@ export const IMPORT_FIELDS: ImportField[] = [
   "location",
   "panels",
   "fixedPanels",
+  "layout",
   "hingeSide",
   "swing",
   "activeLeaf",
   "glass",
+  "glassConstruction",
+  "glassTreatment",
+  "glassAppearance",
+  "glassTint",
+  "glassCoatings",
+  "glassMakeup",
+  "cavityFill",
   "frameFinish",
   "insectScreen",
   "shutter",
+  "shading",
+  "shadingOperation",
+  "shadingColor",
   "hardware",
+  "hardwareSet",
   "otherRequirements",
+  "alternatives",
   "description",
   "notes",
 ];
@@ -71,6 +111,19 @@ export const FIELD_LABELS: Record<ImportField, { en: string; he: string }> = {
   otherRequirements: { en: "Other requirements", he: "דרישות נוספות" },
   description: { en: "Description", he: "תיאור" },
   notes: { en: "Notes", he: "הערות" },
+  layout: { en: "Layout", he: "חלוקה" },
+  glassConstruction: { en: "Glazing construction", he: "מבנה זיגוג" },
+  glassTreatment: { en: "Glass treatment", he: "עיבוד זכוכית" },
+  glassAppearance: { en: "Glass appearance", he: "מראה זכוכית" },
+  glassTint: { en: "Glass tint color", he: "גוון זכוכית" },
+  glassCoatings: { en: "Glass coatings", he: "ציפויי זכוכית" },
+  glassMakeup: { en: "Glass make-up (mm)", he: "הרכב זכוכית (מ״מ)" },
+  cavityFill: { en: "Cavity fill", he: "מילוי מרווח" },
+  shading: { en: "Blind / shading", he: "וילון / הצללה" },
+  shadingOperation: { en: "Blind operation", he: "הפעלת וילון" },
+  shadingColor: { en: "Blind color", he: "צבע וילון" },
+  hardwareSet: { en: "Complete hardware set", he: "סט פרזול מלא" },
+  alternatives: { en: "Alternatives", he: "חלופות" },
 };
 
 /** Normalize text for matching: lowercase, unify Hebrew geresh/quotes, drop punctuation and spacing. */
@@ -106,6 +159,19 @@ const HEADER_ALIASES: Record<ImportField, string[]> = {
   otherRequirements: ["other requirements", "requirements", "other", "דרישות נוספות", "דרישות"],
   description: ["description", "custom description", "תיאור"],
   notes: ["notes", "note", "remarks", "comments", "הערות", "הערה"],
+  layout: ["layout", "layout notation", "partition", "partitions", "division", "חלוקה", "חלוקת חלון"],
+  glassConstruction: ["glazing construction", "glazing type", "glass construction", "glazing units", "מבנה זיגוג", "סוג זיגוג"],
+  glassTreatment: ["glass treatment", "glass type", "safety glass", "עיבוד זכוכית", "סוג זכוכית"],
+  glassAppearance: ["glass appearance", "appearance", "privacy", "מראה זכוכית", "מראה", "פרטיות"],
+  glassTint: ["glass tint", "glass tint color", "tint", "tint color", "גוון זכוכית", "גוון"],
+  glassCoatings: ["glass coatings", "coatings", "coating", "glass performance", "ציפויי זכוכית", "ציפוי", "ציפויים"],
+  glassMakeup: ["glass make up", "glass makeup", "make up", "makeup", "glass build up", "glass thickness", "הרכב זכוכית", "עובי זכוכית", "הרכב"],
+  cavityFill: ["cavity fill", "gas fill", "spacer fill", "מילוי מרווח", "מילוי", "גז"],
+  shading: ["blind", "blinds", "shading", "blind type", "וילון", "וילונות", "הצללה"],
+  shadingOperation: ["blind operation", "shading operation", "blind control", "הפעלת וילון", "הפעלה"],
+  shadingColor: ["blind color", "blind colour", "shading color", "צבע וילון"],
+  hardwareSet: ["complete hardware set", "hardware set", "full hardware set", "סט פרזול מלא", "סט פרזול"],
+  alternatives: ["alternatives", "alternative", "options", "חלופות", "חלופה"],
 };
 
 /** Map file headers to fields. A bilingual header like "Width (mm) / רוחב" matches on either part. */
@@ -181,7 +247,87 @@ const UNIT_VALUES: Record<RfqUnit, string[]> = {
   cm: ["cm", "centimeter", "centimetre", "centimeters", "ס״מ", "סמ", "סנטימטר"],
 };
 
+const CONSTRUCTION_VALUES: Record<Exclude<GlazingConstruction, "unspecified">, string[]> = {
+  single: ["single", "single glazing", "single glazed", "1", "יחיד", "זיגוג יחיד", "זכוכית יחידה"],
+  double: ["double", "double glazing", "double glazed", "dgu", "igu", "insulated", "2", "כפול", "זיגוג כפול", "בידודית", "זכוכית בידודית"],
+  triple: ["triple", "triple glazing", "triple glazed", "tgu", "3", "משולש", "זיגוג משולש"],
+  custom: ["custom", "other", "מותאם", "אחר"],
+  supplier: ["ask supplier", "supplier", "supplier recommendation", "recommend", "לשאול את הספק", "ספק", "המלצת ספק"],
+};
+
+const TREATMENT_VALUES: Record<Exclude<GlassTreatment, "unspecified">, string[]> = {
+  annealed: ["annealed", "float", "standard", "רגילה", "מקוררת", "פלואט"],
+  heat_strengthened: ["heat strengthened", "heat-strengthened", "hs", "מחוזקת", "מחוזקת בחום"],
+  tempered: ["tempered", "toughened", "מחוסמת", "מחוסם", "חסום"],
+  laminated: ["laminated", "lami", "triplex", "שכבתית", "טריפלקס", "למינציה"],
+  tempered_laminated: ["tempered laminated", "toughened laminated", "laminated tempered", "שכבתית מחוסמת", "טריפלקס מחוסם"],
+  supplier: ["ask supplier", "supplier", "supplier recommendation", "לשאול את הספק", "המלצת ספק"],
+};
+
+const APPEARANCE_VALUES: Record<Exclude<GlassAppearance, "unspecified">, string[]> = {
+  clear: ["clear", "transparent", "שקופה", "שקוף"],
+  low_iron: ["low iron", "low-iron", "ultra clear", "ultra-clear", "extra clear", "אולטרה שקופה", "אולטרה-שקופה"],
+  tinted: ["tinted", "tint", "colored", "coloured", "כהה", "בגוון", "צבועה"],
+  reflective: ["reflective", "mirror", "רפלקטיבית", "מראה", "רפלקטיבי"],
+  frosted: ["frosted", "satin", "acid etched", "sandblasted", "חלבית", "חלבי", "חומצה"],
+  patterned: ["patterned", "obscure", "textured", "מעוטרת", "עמומה"],
+  custom: ["custom", "other", "מותאם", "אחר"],
+};
+
+const COATING_VALUES: Record<GlassCoating, string[]> = {
+  low_e: ["low e", "low-e", "lowe", "low emissivity", "בידוד תרמי"],
+  solar_control: ["solar control", "solar", "sun control", "anti sun", "בקרת שמש", "אנטי סאן"],
+  uv: ["uv", "uv protection", "הגנת uv"],
+  acoustic: ["acoustic", "sound", "אקוסטי", "בידוד אקוסטי"],
+  custom: ["custom", "other", "אחר"],
+};
+
+const FILL_VALUES: Record<Exclude<CavityFill, "unspecified">, string[]> = {
+  air: ["air", "אוויר"],
+  argon: ["argon", "ar", "ארגון"],
+  other: ["other", "אחר"],
+};
+
+const SHADING_VALUES: Record<ShadingType, string[]> = {
+  integrated: ["integrated", "integrated blind", "between glass", "between panes", "built in", "מובנה", "וילון מובנה", "בין הזכוכיות"],
+  interior: ["interior", "internal", "inside", "פנימי", "וילון פנימי"],
+  exterior: ["exterior", "external", "outside", "חיצוני", "וילון חיצוני"],
+  roller_shutter: ["roller shutter", "shutter", "roller", "תריס", "תריס גלילה"],
+  other: ["other", "custom", "אחר"],
+  supplier: ["ask supplier", "supplier", "לשאול את הספק"],
+};
+
+const NONE_VALUES = ["none", "no", "n", "-", "לא", "אין", "ללא"];
+
+const SHADING_OP_VALUES: Record<Exclude<ShadingOperation, "unspecified">, string[]> = {
+  manual: ["manual", "hand", "ידני"],
+  motorized: ["motorized", "motorised", "electric", "motor", "חשמלי", "ממונע"],
+};
+
 export const parseCategory = (raw: string) => lookup(raw, CATEGORY_VALUES);
+export const parseConstruction = (raw: string) => lookup(raw, CONSTRUCTION_VALUES);
+export const parseTreatment = (raw: string) => lookup(raw, TREATMENT_VALUES);
+export const parseAppearance = (raw: string) => lookup(raw, APPEARANCE_VALUES);
+export const parseCavityFill = (raw: string) => lookup(raw, FILL_VALUES);
+export const parseShadingOperation = (raw: string) => lookup(raw, SHADING_OP_VALUES);
+
+/** "none" is a valid answer meaning no blind; returns null for it. */
+export function parseShading(raw: string): Parsed<ShadingType | null> {
+  if (NONE_VALUES.includes(normKey(raw))) return { ok: true, value: null };
+  return lookup(raw, SHADING_VALUES);
+}
+
+/** Comma/semicolon/plus separated list; any unknown part fails the whole cell so nothing is silently dropped. */
+export function parseCoatings(raw: string): Parsed<GlassCoating[]> {
+  const parts = raw.split(/[,;+]/).map((s) => s.trim()).filter(Boolean);
+  const out: GlassCoating[] = [];
+  for (const p of parts) {
+    const r = lookup(p, COATING_VALUES);
+    if (!r.ok) return { ok: false };
+    if (!out.includes(r.value)) out.push(r.value);
+  }
+  return { ok: true, value: out };
+}
 export const parseSide = (raw: string) => lookup(raw, SIDE_VALUES);
 export const parseSwing = (raw: string) => lookup(raw, SWING_VALUES);
 export const parseRequirement = (raw: string) => lookup(raw, REQUIREMENT_VALUES);

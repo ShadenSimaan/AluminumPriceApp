@@ -13,6 +13,7 @@ import {
 } from "../import/importer";
 import { buildTemplateCsv, buildTemplateXlsx } from "../import/template";
 import { decodeText, parseCsv } from "../import/csv";
+import { isAdvancedLayout, numberedGlass } from "../layout";
 
 function prepare(name: string, bytes: Uint8Array) {
   const file = parseImportBytes(name, bytes);
@@ -36,7 +37,19 @@ describe("templates", () => {
     const errors = results.flatMap((r, i) => r.errors.map((e) => `${importRows[i].rowNumber}:${e.key}`));
     expect(errors).toEqual([]);
     const items = committableItems(importRows, results)!;
-    expect(items).toHaveLength(7);
+    expect(items).toHaveLength(9);
+    const w5 = items.find((i) => i.reference === "W-05")!;
+    expect(w5.panels).toHaveLength(6);
+    expect(w5.panels.map((p) => p.operation)).toEqual(["fixed", "casement", "casement", "casement", "casement", "fixed"]);
+    expect(w5.glassSpec).toMatchObject({ construction: "double", treatment: "tempered", appearance: "clear", coatings: ["low_e"] });
+    expect(w5.glassSpec.panes.map((p) => p.thicknessMm)).toEqual([6, 6]);
+    expect(w5.glassSpec.cavities[0]).toMatchObject({ widthMm: 16, fill: "argon" });
+    expect(w5.completeHardwareSet).toBe(true);
+    const w6 = items.find((i) => i.reference === "W-06")!;
+    expect(isAdvancedLayout(w6.layout)).toBe(true);
+    expect(numberedGlass(w6.layout).length).toBe(5);
+    expect(w6.shading[0]).toMatchObject({ type: "integrated", operation: "manual" });
+    expect(w6.alternatives.length).toBeGreaterThan(0);
     const w1 = items.find((i) => i.reference === "W-01")!;
     expect(w1.openingType).toBe("sliding_window");
     expect(w1.widthCm).toBe(180);
@@ -48,13 +61,13 @@ describe("templates", () => {
     expect(d2).toMatchObject({ openingType: "hinged_door_double", swing: "outward", activeLeaf: "right" });
     // Missing reference on the custom row is generated, unique, and flagged as automatic
     const autoIdx = results.findIndex((r) => r.autoRef);
-    expect(results[autoIdx].item!.reference).toBe("W-05");
+    expect(results[autoIdx].item!.reference).toBe("W-07");
   });
 
   it("csv template round-trips the same way", () => {
     const { analysis, importRows } = prepare("t.csv", csv(buildTemplateCsv()));
     const results = validateImportRows(importRows, { unit: analysis.detectedUnit, existingReferences: [], mode: "append" });
-    expect(committableItems(importRows, results)).toHaveLength(7);
+    expect(committableItems(importRows, results)).toHaveLength(9);
   });
 });
 

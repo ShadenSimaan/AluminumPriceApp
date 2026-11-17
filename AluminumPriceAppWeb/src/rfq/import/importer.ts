@@ -1,16 +1,26 @@
-import type { RfqItem, RfqPanel, RfqUnit } from "../types";
-import { createRfqItem, nextReference, normalizeItemConfig, OPENING_TYPE_DEFS, validateItem, type ItemIssueCode } from "../presets";
+import type { FrameNode, GlassSpec, RfqItem, RfqPanel, RfqUnit, ShadingEntry, Side } from "../types";
+import { createRfqItem, makePanelFor, nextReference, normalizeItemConfig, OPENING_TYPE_DEFS, validateItem, withPanels, type ItemIssueCode } from "../presets";
 import { parseStrictNumber, unitToCm } from "../units";
 import { rfqUuid } from "../rfqState";
+import { LayoutParseError, mapPanels, newPanel, parseLayoutNotation, toRfqPanel } from "../layout";
+import { constructionForPaneCount, emptyGlassSpec, fixedPaneCount, parseMakeup, setConstruction } from "../glass";
+import { accessoryFromLegacyScreen, newShading } from "../accessories";
 import { decodeText, parseCsv } from "./csv";
 import { readXlsx, type Sheet } from "./xlsx";
 import {
   IMPORT_FIELDS,
   REQUIRED_FIELDS,
   autoMapHeaders,
+  parseAppearance,
   parseCategory,
+  parseCavityFill,
+  parseCoatings,
+  parseConstruction,
   parseOpeningType,
   parseRequirement,
+  parseShading,
+  parseShadingOperation,
+  parseTreatment,
   parseSide,
   parseSwing,
   parseUnit,
@@ -136,7 +146,13 @@ const ISSUE_FIELD: Partial<Record<ItemIssueCode, ImportField>> = {
   quantity_invalid: "quantity",
   category_mismatch: "openingType",
   needs_operable_panel: "fixedPanels",
+  hinged_leaf_count: "fixedPanels",
   custom_description_required: "description",
+  integrated_blind_single_glazing: "shading",
+  layout_size_invalid: "layout",
+  layout_sizes_exceed: "layout",
+  layout_sizes_mismatch: "layout",
+  layout_decorative_invalid: "layout",
 };
 
 function parseDimension(raw: string, unit: RfqUnit | null): { cm: number | null; err?: RowMessage; unit?: RfqUnit } {
@@ -154,6 +170,46 @@ function parseDimension(raw: string, unit: RfqUnit | null): { cm: number | null;
   if (n == null) return { cm: null, err: { key: "invalidNumber", source: "imp", params: { v: raw } } };
   if (!effective) return { cm: null, err: { key: "unitRequired", source: "imp" } };
   return { cm: unitToCm(n, effective), unit: effective };
+}
+
+type Report = (field: ImportField, key: string, params?: Record<string, string | number>) => void;
+
+/** Window-level glass from the glass columns. Unknown values are errors; missing values stay "supplier to confirm". */
+function parseGlassColumns(v: Partial<Record<ImportField, string>>, err: Report, warn: Report): GlassSpec {
+  let spec = emptyGlassSpec();
+  const pick = <T,>(field: ImportField, parse: (raw: string) => { ok: true; value: T } | { ok: false }, apply: (val: T) => void) => {
+    const raw = v[field];
+    if (!raw) return;
+    const r = parse(raw);
+    if (r.ok) apply(r.value);
+    else err(field, "unknownValue", { v: raw });
+  };
+  pick("glassConstruction", parseConstruction, (c) => (spec = setConstruction(spec, c)));
+  pick("glassTreatment", parseTreatment, (t) => (spec = { ...spec, treatment: t }));
+  pick("glassAppearance", parseAppearance, (a) => (spec = { ...spec, appearance: a }));
+  pick("glassCoatings", parseCoatings, (c) => (spec = { ...spec, coatings: c }));
+  if (v.glassTint) {
+    spec = { ...spec, tintColor: v.glassTint };
+    if (spec.appearance === "unspecified") spec = { ...spec, appearance: "tinted" };
+    else if (spec.appearance !== "tinted") warn("glassTint", "notApplicable", { field: "glassTint" });
+  }
+  if (v.glassMakeup) {
+    const m = parseMakeup(v.glassMakeup);
+    if (!m) err("glassMakeup", "makeupInvalid", { v: v.glassMakeup });
+    else {
+      const fixed = fixedPaneCount(spec.construction);
+      if (fixed != null && fixed !== m.panes.length) err("glassMakeup", "makeupConflict", { v: v.glassMakeup, n: m.panes.length });
+      else {
+        if (spec.construction === "unspecified") spec = setConstruction(spec, constructionForPaneCount(m.panes.length));
+        spec = { ...spec, panes: m.panes, cavities: m.cavities };
+      }
+    }
+  }
+  pick("cavityFill", parseCavityFill, (f) => {
+    if (!spec.cavities.length) warn("cavityFill", "notApplicable", { field: "cavityFill" });
+    else spec = { ...spec, cavities: spec.cavities.map((c) => ({ ...c, fill: f })) };
+  });
+  return spec;
 }
 
 function validateOne(row: ImportRow, ctx: ValidationContext): Omit<RowResult, "autoRef"> & { explicitRef: string } {
@@ -208,43 +264,79 @@ function validateOne(row: ImportRow, ctx: ValidationContext): Omit<RowResult, "a
   // Keep the category the file states, so a mismatch is reported instead of silently corrected.
   item = { ...item, category: cat.value, widthCm: w?.cm ?? null, heightCm: h?.cm ?? null, quantity: qty ?? 0 };
 
-  // Panels
-  let count = item.panels.length;
-  if (v.panels) {
-    const p = parseStrictNumber(v.panels);
-    if (def.maxPanels === 0) warn("panels", "notApplicable", { field: "panels" });
-    else if (p == null || !Number.isInteger(p) || p < def.minPanels || p > def.maxPanels) {
-      err("panels", "panelsInvalid", { v: v.panels, min: def.minPanels, max: def.maxPanels });
-    } else count = p;
-  }
-  let panels: RfqPanel[] =
-    count === item.panels.length
-      ? item.panels.slice()
-      : Array.from({ length: count }, (_, i): RfqPanel =>
-          def.operableOp === "sliding"
-            ? { operation: "sliding", slideDirection: i < count / 2 ? "right" : "left" }
-            : { operation: def.operableOp ?? "fixed" }
-        );
-
-  if (v.fixedPanels) {
-    if (!def.allowFixedPanels || !def.operableOp) warn("fixedPanels", "notApplicable", { field: "fixedPanels" });
-    else {
-      const nums = v.fixedPanels.split(/[,;\s]+/).filter(Boolean).map((s) => parseStrictNumber(s));
-      if (nums.some((n) => n == null || !Number.isInteger(n) || n < 1 || n > count)) {
-        err("fixedPanels", "fixedPanelsInvalid", { v: v.fixedPanels });
-      } else {
-        panels = panels.map((p, i) => (nums.includes(i + 1) ? { operation: "fixed" } : p));
-      }
-    }
-  }
-
-  const hingeApplies = def.operableOp === "casement" || def.operableOp === "tilt_turn" || (def.operableOp === "hinged" && def.maxPanels === 1);
+  const isCustom = type.value === "custom";
+  const hingeApplies = def.operableOp === "casement" || def.operableOp === "tilt_turn" || type.value === "hinged_door_single";
+  let hingeValue: Side | undefined;
   if (v.hingeSide) {
     const s = parseSide(v.hingeSide);
     if (!s.ok) err("hingeSide", "unknownValue", { v: v.hingeSide });
     else if (!hingeApplies) warn("hingeSide", "notApplicable", { field: "hingeSide" });
-    else panels = panels.map((p) => (p.operation === "fixed" ? p : { ...p, hingeSide: s.value }));
-  } else if (hingeApplies) {
+    else hingeValue = s.value;
+  }
+
+  // Layout: an explicit layout cell wins over the simple panel-count columns.
+  let layout: FrameNode | null = null;
+  if (v.layout) {
+    if (isCustom) warn("layout", "notApplicable", { field: "layout" });
+    else {
+      const explicit = new Set<string>();
+      try {
+        const parsed = parseLayoutNotation(v.layout, itemUnit, ({ fixed, side }) => {
+          const p = fixed || !def.operableOp ? newPanel("fixed") : makePanelFor(def, 0, 2);
+          const s = side ?? hingeValue;
+          if (s && p.operation === "sliding" && side) p.slideDirection = side;
+          else if (s && p.operation !== "fixed" && p.operation !== "sliding" && p.operation !== "top_hung") p.hingeSide = s;
+          else return p;
+          explicit.add(p.id);
+          return p;
+        });
+        // Unstated sides default by position: sliding panels toward the centre, hinges on the outer side.
+        layout = mapPanels(parsed, (p, i, n) => {
+          if (explicit.has(p.id) || p.operation === "fixed" || p.operation === "top_hung") return p;
+          const outer: Side = i < n / 2 ? "left" : "right";
+          return p.operation === "sliding" ? { ...p, slideDirection: outer === "left" ? "right" : "left" } : { ...p, hingeSide: outer };
+        });
+      } catch (e) {
+        const pos = e instanceof LayoutParseError ? e.pos + 1 : 1;
+        err("layout", "layoutInvalid", { v: v.layout, pos });
+      }
+      if (layout && (v.panels || v.fixedPanels)) warn("layout", "layoutOverridesPanels");
+    }
+  }
+
+  let panels: RfqPanel[] = item.panels.slice();
+  if (!layout) {
+    let count = item.panels.length;
+    if (v.panels) {
+      const p = parseStrictNumber(v.panels);
+      if (isCustom) warn("panels", "notApplicable", { field: "panels" });
+      else if (p == null || !Number.isInteger(p) || p < Math.max(1, def.minPanels)) {
+        err("panels", "panelsInvalid", { v: v.panels, min: Math.max(1, def.minPanels) });
+      } else count = p;
+    }
+    if (count !== item.panels.length) {
+      let made = 0;
+      panels = Array.from({ length: count }, (_, i) => toRfqPanel(makePanelFor(def, i, count, made++)));
+    }
+
+    if (v.fixedPanels) {
+      if (!def.allowFixedPanels || !def.operableOp) warn("fixedPanels", "notApplicable", { field: "fixedPanels" });
+      else {
+        const nums = v.fixedPanels.split(/[,;\s]+/).filter(Boolean).map((s) => parseStrictNumber(s));
+        if (nums.some((n) => n == null || !Number.isInteger(n) || n < 1 || n > count)) {
+          err("fixedPanels", "fixedPanelsInvalid", { v: v.fixedPanels });
+        } else {
+          panels = panels.map((p, i) => (nums.includes(i + 1) ? { operation: "fixed" } : p));
+          if (def.operableLeaves != null) {
+            // Re-assign leaves so the non-fixed panels are the operable ones.
+            panels = panels.map((p, i) => (nums.includes(i + 1) ? p : { operation: def.operableOp!, hingeSide: i < count / 2 ? "left" : "right" }));
+          }
+        }
+      }
+    }
+    if (hingeValue) panels = panels.map((p) => (p.operation === "fixed" || p.operation === "sliding" || p.operation === "top_hung" ? p : { ...p, hingeSide: hingeValue }));
+  }
+  if (hingeApplies && !v.hingeSide && !(layout && /[OF][LR]/i.test(v.layout ?? ""))) {
     warn("hingeSide", "defaulted", { field: "hingeSide" });
   }
 
@@ -278,26 +370,69 @@ function validateOne(row: ImportRow, ctx: ValidationContext): Omit<RowResult, "a
     return r.value;
   };
 
+  const glassSpec = parseGlassColumns(v, err, warn);
+
+  const shading: ShadingEntry[] = [];
+  if (v.shading) {
+    const s = parseShading(v.shading);
+    if (!s.ok) err("shading", "unknownValue", { v: v.shading });
+    else if (s.value) {
+      const entry = newShading(rfqUuid(), s.value);
+      if (v.shadingOperation) {
+        const op = parseShadingOperation(v.shadingOperation);
+        if (op.ok) entry.operation = op.value;
+        else err("shadingOperation", "unknownValue", { v: v.shadingOperation });
+      }
+      entry.color = v.shadingColor ?? "";
+      shading.push(entry);
+    }
+  } else {
+    if (v.shadingOperation) warn("shadingOperation", "notApplicable", { field: "shadingOperation" });
+    if (v.shadingColor) warn("shadingColor", "notApplicable", { field: "shadingColor" });
+  }
+
+  let completeHardwareSet = false;
+  if (v.hardwareSet) {
+    const r = parseRequirement(v.hardwareSet);
+    if (r.ok) completeHardwareSet = r.value === "required";
+    else err("hardwareSet", "unknownValue", { v: v.hardwareSet });
+  }
+
+  const alternatives = (v.alternatives ?? "")
+    .split(/\s*;\s*|\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((description) => ({ id: rfqUuid(), description }));
+
+  const screen = req("insectScreen");
+  const screenAcc = accessoryFromLegacyScreen(rfqUuid(), screen);
+
   const category = item.category;
-  item = normalizeItemConfig({
+  const base: RfqItem = {
     ...item,
-    panels,
     swing,
     activeLeaf,
     location: v.location ?? "",
     glass: v.glass ?? "",
+    glassSpec,
     frameFinish: v.frameFinish ?? "",
-    insectScreen: req("insectScreen"),
+    insectScreen: screen,
     shutter: req("shutter"),
+    shading,
+    accessories: screenAcc ? [screenAcc] : [],
+    completeHardwareSet,
+    alternatives,
     hardware: v.hardware ?? "",
     otherRequirements: v.otherRequirements ?? "",
     customDescription: v.description ?? "",
     notes: v.notes ?? "",
-  });
+  };
+  item = layout ? normalizeItemConfig({ ...base, layout }) : withPanels(base, panels);
   item = { ...item, category };
 
   for (const issue of validateItem(item)) {
     if (issue.code === "reference_required") continue; // generated later
+    if (issue.code.startsWith("layout_") && errors.some((e) => e.field === "layout")) continue;
     if ((issue.code === "width_required" || issue.code === "height_required") && errors.some((e) => e.field === ISSUE_FIELD[issue.code])) continue;
     if ((issue.code === "width_invalid" || issue.code === "height_invalid") && errors.some((e) => e.field === ISSUE_FIELD[issue.code])) continue;
     if (issue.code === "quantity_invalid" && errors.some((e) => e.field === "quantity")) continue;

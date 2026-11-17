@@ -34,7 +34,18 @@ import { Btn, Field, RfqModal, Select } from "./ui";
 
 type Step = "file" | "mapping" | "review";
 
-const TEXT_FIELDS: ImportField[] = ["location", "glass", "frameFinish", "hardware", "otherRequirements", "description", "notes"];
+const TEXT_FIELDS: ImportField[] = [
+  "location",
+  "glass",
+  "glassTint",
+  "frameFinish",
+  "shadingColor",
+  "hardware",
+  "otherRequirements",
+  "alternatives",
+  "description",
+  "notes",
+];
 
 export default function RfqImportDialog({
   lang,

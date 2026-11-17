@@ -1,5 +1,6 @@
 import type { RfqLanguage, SupplierRequest } from "./types";
 import { formatRfqNumber } from "./rfqState";
+import { safeExternalUrl } from "./suppliers";
 import { isTauri } from "../storage";
 import { openPdfSaveFolder, printPdfBytes, savePdfBytes } from "../pdfExporter";
 
@@ -35,6 +36,19 @@ export async function printRfqPdf(req: SupplierRequest, lang: RfqLanguage) {
 
 export function openRfqPdfFolder(pdfSaveFolder?: string) {
   return openPdfSaveFolder(pdfSaveFolder, "supplier_rfq");
+}
+
+/** Open an http(s) URL in the system browser. Returns false for anything that is not a plain web link. */
+export async function openExternalUrl(url: string): Promise<boolean> {
+  const safe = safeExternalUrl(url);
+  if (!safe) return false;
+  if (isTauri()) {
+    const opener = await import("@tauri-apps/plugin-opener");
+    await opener.openUrl(safe);
+    return true;
+  }
+  window.open(safe, "_blank", "noopener,noreferrer");
+  return true;
 }
 
 /** Save a generated file: Tauri → native "Save as" dialog; browser → download. Returns false if cancelled. */

@@ -172,7 +172,9 @@ export function RfqModal({
   wide?: boolean;
 }) {
   useEffect(() => {
-    const onEsc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
+    };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
   }, [onClose]);
