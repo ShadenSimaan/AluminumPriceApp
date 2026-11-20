@@ -17,8 +17,11 @@ import {
 } from "./quote/windowLine";
 import QuoteProductList from "./quote/QuoteProductList";
 import DocumentHeader from "./brand/DocumentHeader";
+import WindowImportNote from "./quote/WindowImportNote";
 import WindowPicker from "./quote/WindowPicker";
+import { importWindowsFromFile, quoteLineFromWindow } from "./quote/windowImport";
 import RfqItemEditor from "./rfq/RfqItemEditor";
+import RfqImportDialog from "./rfq/RfqImportDialog";
 import {
   Select,
   SelectContent,
@@ -323,6 +326,9 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const [dragPreviewPos, setDragPreviewPos] = React.useState<{ x: number; y: number } | null>(null);
   const [windowPickerOpen, setWindowPickerOpen] = React.useState(false);
   const [drawingEditId, setDrawingEditId] = React.useState<string | null>(null);
+  const windowFileRef = React.useRef<HTMLInputElement>(null);
+  const [windowImportNote, setWindowImportNote] = React.useState<{ text: string; tone: "ok" | "warn" | "error" } | null>(null);
+  const [windowImportReview, setWindowImportReview] = React.useState<{ file: File; unit: "cm" | "mm" } | null>(null);
   const itemsRef = React.useRef(state.current.items);
   const freeFormRef = React.useRef(state.current.freeFormAdditions);
   itemsRef.current = state.current.items;
@@ -1291,6 +1297,25 @@ const QuotePage: React.FC<QuotePageProps> = ({
         </div>
       )}
 
+      {windowImportReview && (
+        <RfqImportDialog
+          lang="he"
+          forQuote
+          defaultUnit={windowImportReview.unit}
+          initialFile={windowImportReview.file}
+          existingItems={state.current.items.flatMap((item) => (item.configuration ? [item.configuration] : []))}
+          confirm={async (message) => window.confirm(message)}
+          onCancel={() => setWindowImportReview(null)}
+          onCommit={(items, mode) => {
+            const lines = items.map((item) => quoteLineFromWindow(item, state.addons, state.profiles).line);
+            if (mode === "replace") updateCurrent("items", lines);
+            else if (onAddConfiguredLines) onAddConfiguredLines(lines);
+            else updateCurrent("items", [...state.current.items, ...lines]);
+            setWindowImportNote({ text: lines.length === 1 ? "חלון אחד נוסף להצעה." : `${lines.length} חלונות נוספו להצעה.`, tone: "ok" });
+            setWindowImportReview(null);
+          }}
+        />
+      )}
       {windowPickerOpen && (
         <WindowPicker
           quoteItems={state.current.items}
@@ -1341,9 +1366,50 @@ const QuotePage: React.FC<QuotePageProps> = ({
       {/* Items Table + totals + save/export */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-          <h2 className="text-xl font-semibold">
-            {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
-          </h2>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-xl font-semibold">
+              {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
+            </h2>
+            <input
+              ref={windowFileRef}
+              type="file"
+              accept=".csv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                void (async () => {
+                  const result = importWindowsFromFile({
+                    fileName: file.name,
+                    bytes: new Uint8Array(await file.arrayBuffer()),
+                    profiles: state.profiles,
+                    addons: state.addons,
+                    existingReferences: state.current.items.flatMap((item) => (item.configuration?.reference ? [item.configuration.reference] : [])),
+                    dimensionUnit,
+                  });
+                  if (result.lines.length) {
+                    if (onAddConfiguredLines) onAddConfiguredLines(result.lines);
+                    else updateCurrent("items", [...state.current.items, ...result.lines]);
+                    setWindowImportReview(null);
+                  } else if (result.needsReview) {
+                    setWindowImportReview({ file, unit: result.unit ?? dimensionUnit });
+                  } else {
+                    setWindowImportReview(null);
+                  }
+                  const tone = result.lines.length === 0 ? "error" : result.message.includes("דולגו") || result.message.includes("בלי פרופיל") ? "warn" : "ok";
+                  setWindowImportNote({ text: result.message, tone });
+                })();
+              }}
+            />
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-lg border border-sky-300 bg-sky-50 text-sky-800 text-sm hover:bg-sky-100"
+              onClick={() => windowFileRef.current?.click()}
+            >
+              ייבוא חלונות מ-Excel / CSV
+            </button>
+          </div>
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-sm text-slate-600 hidden sm:inline">
               הטבלה נגללת אופקית במסכים קטנים
@@ -1363,6 +1429,15 @@ const QuotePage: React.FC<QuotePageProps> = ({
             </button>
           </div>
         </div>
+        <WindowImportNote profileNames={state.profiles.map((profile) => profile.name)} />
+        {windowImportNote && (
+          <p
+            className={`text-sm mb-3 ${windowImportNote.tone === "error" ? "text-rose-700" : windowImportNote.tone === "warn" ? "text-amber-800" : "text-emerald-800"}`}
+            role="status"
+          >
+            {windowImportNote.text}
+          </p>
+        )}
         <div className="table-scroll" ref={itemsColumns.containerRef}>
           <table
             className="table-inner-min table-quote-items w-full text-sm"

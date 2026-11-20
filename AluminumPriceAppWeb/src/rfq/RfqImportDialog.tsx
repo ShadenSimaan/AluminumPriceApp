@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RfqItem, RfqLanguage, RfqUnit } from "./types";
 import { RFQ_OPENING_TYPES } from "./types";
 import { dict, dirOf, fmt } from "./i18n";
@@ -28,6 +28,7 @@ import {
   type ImportField,
 } from "./import/schema";
 import { buildTemplateCsv, buildTemplateXlsx } from "./import/template";
+import { relaxQuoteImportRows } from "../quote/windowImport";
 import { saveGeneratedFile } from "./rfqExport";
 import RfqDiagram from "./RfqDiagram";
 import { Btn, Field, RfqModal, Select } from "./ui";
@@ -53,12 +54,19 @@ export default function RfqImportDialog({
   onCancel,
   onCommit,
   confirm,
+  forQuote = false,
+  defaultUnit,
+  initialFile,
 }: {
   lang: RfqLanguage;
   existingItems: RfqItem[];
   onCancel: () => void;
   onCommit: (items: RfqItem[], mode: "append" | "replace") => void;
   confirm: (message: string) => Promise<boolean>;
+  /** Quotation import: category and quantity can be omitted, and a chosen file can be opened immediately. */
+  forQuote?: boolean;
+  defaultUnit?: RfqUnit;
+  initialFile?: File | null;
 }) {
   const d = dict(lang);
   const dir = dirOf(lang);
@@ -93,7 +101,7 @@ export default function RfqImportDialog({
     setHeaderRow(h);
     setMapping(a.mapping);
     setDetectedUnit(a.detectedUnit);
-    setUnit(a.detectedUnit ?? "");
+    setUnit(a.detectedUnit ?? defaultUnit ?? "");
   };
 
   const onFile = async (file: File) => {
@@ -115,9 +123,16 @@ export default function RfqImportDialog({
     }
   };
 
+  useEffect(() => {
+    if (initialFile) void onFile(initialFile);
+    // The file is chosen before this dialog opens; re-reading it on later renders would wipe edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const goReview = () => {
     if (!sheet) return;
-    setRows(buildImportRows(sheet.rows, headerRow, mapping));
+    const built = buildImportRows(sheet.rows, headerRow, mapping);
+    setRows(forQuote ? relaxQuoteImportRows(built) : built);
     setStep("review");
   };
 
@@ -128,7 +143,8 @@ export default function RfqImportDialog({
   const results = useMemo(() => validateImportRows(rows, ctx), [rows, ctx]);
   const summary = importSummary(rows, results);
   const items = committableItems(rows, results);
-  const missingRequired = REQUIRED_FIELDS.filter((f) => mapping[f] == null);
+  const requiredFields = forQuote ? REQUIRED_FIELDS.filter((f) => f !== "category" && f !== "quantity") : REQUIRED_FIELDS;
+  const missingRequired = requiredFields.filter((f) => mapping[f] == null);
 
   const editRow = (key: string, field: ImportField, value: string) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, blank: false, values: { ...r.values, [field]: value } } : r)));
@@ -309,7 +325,7 @@ export default function RfqImportDialog({
             <div className="font-semibold mb-2">{d.imp.columnMapping}</div>
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {IMPORT_FIELDS.map((f) => {
-                const required = REQUIRED_FIELDS.includes(f);
+                const required = requiredFields.includes(f);
                 return (
                   <Field key={f} label={`${fieldLabel(f)}${required ? ` (${d.imp.required})` : ""}`} error={required && mapping[f] == null ? fmt(d.imp.missing, { field: fieldLabel(f) }) : undefined}>
                     <Select<string>

@@ -197,7 +197,8 @@ function parseGlassColumns(v: Partial<Record<ImportField, string>>, err: Report,
     const m = parseMakeup(v.glassMakeup);
     if (!m) err("glassMakeup", "makeupInvalid", { v: v.glassMakeup });
     else {
-      const fixed = fixedPaneCount(spec.construction);
+      // "unspecified" has no pane count yet; the make-up itself chooses single/double/triple.
+      const fixed = spec.construction === "unspecified" ? null : fixedPaneCount(spec.construction);
       if (fixed != null && fixed !== m.panes.length) err("glassMakeup", "makeupConflict", { v: v.glassMakeup, n: m.panes.length });
       else {
         if (spec.construction === "unspecified") spec = setConstruction(spec, constructionForPaneCount(m.panes.length));

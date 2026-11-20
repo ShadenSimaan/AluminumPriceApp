@@ -179,7 +179,7 @@ export function RfqModal({
     return () => window.removeEventListener("keydown", onEsc);
   }, [onClose]);
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true">
+    <div className="modal-overlay" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
       {/* .modal-panel's max-height uses the unitless --vh, which makes the calc invalid. */}
       <div
         dir={dir}
