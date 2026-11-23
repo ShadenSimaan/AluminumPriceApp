@@ -3,6 +3,7 @@
 import type { AppState, Profile, Quote } from "./types";
 import { documentTypeLabel, normalizeDocumentType } from "./types";
 import { DEFAULT_RFQ_SETTINGS, normalizeRfqSlice } from "./rfq/rfqState";
+import { DEFAULT_MANUFACTURERS, normalizeManufacturers } from "./quote/manufacturers";
 
 export function uuid() {
   if ((crypto as any)?.randomUUID) return crypto.randomUUID();
@@ -42,6 +43,7 @@ export const DEFAULT_STATE: AppState = {
   customers: [],
   quotes: [],
   profiles: defaultProfiles,
+  manufacturers: DEFAULT_MANUFACTURERS.map((m) => ({ ...m })),
   addons: defaultAddonsPreset.map((a) => ({ ...a })),
   current: {
     customerName: "",
@@ -60,6 +62,7 @@ export const DEFAULT_STATE: AppState = {
     installationTerms: "",
     notes: "",
     showTotals: true,
+    includeProductDetails: true,
   },
   ui: { tab: "quote", settingsOpen: false, profilesSettingsOpen: false },
   pdfSaveFolder: undefined,
@@ -133,6 +136,7 @@ export function normalizeState(obj: unknown): AppState {
         : undefined,
     notes: String(currentRaw.notes ?? ""),
     showTotals: currentRaw.showTotals !== false,
+    includeProductDetails: currentRaw.includeProductDetails !== false,
   };
   const uiRaw: any = o.ui ?? {};
   // Legacy "supplier_import" tab is gone — quotation prices are imported on בקשה לספק.
@@ -162,6 +166,7 @@ export function normalizeState(obj: unknown): AppState {
     customers,
     quotes,
     profiles,
+    manufacturers: normalizeManufacturers(o.manufacturers),
     addons,
     current,
     ui,

@@ -12,8 +12,11 @@ import { DEFAULT_STATE, normalizeState, uuid } from "./appState";
 import { confirmDestructive } from "./confirmDialog";
 import { applyCustomerImport, type DraftRow } from "./customers/customerImport";
 import { quoteMoney } from "./quote/pricing";
-import { duplicateLineItem, remapQuoteItems, withSubtotal } from "./quote/windowLine";
+import { duplicateLineItem, lineAfterProfileSync, remapQuoteItems, withSubtotal } from "./quote/windowLine";
 import { toCustomerPdfPayload } from "./quote/customerPayload";
+import { groupProfilesByManufacturer, logoFileToPngDataUrl } from "./quote/manufacturers";
+import ManufacturerBadge from "./quote/ManufacturerBadge";
+import { CompanySelect } from "./quote/ProfileOptions";
 import type { SupplierRequest } from "./rfq/types";
 import { buildCustomerQuoteFromRfq, type ConvertToQuoteOptions } from "./rfq/toCustomerQuote";
 import { dict, fmt } from "./rfq/i18n";
@@ -84,6 +87,7 @@ function emptyCurrentState(): AppCurrentState {
     paymentTerms: "",
     installationTerms: "",
     showTotals: true,
+    includeProductDetails: true,
   };
 }
 
@@ -229,6 +233,7 @@ function buildQuoteContentSnapshotFromCurrent(current: AppCurrentState) {
     installationTerms: current.installationTerms ?? "",
     quoteNumber: current.quoteNumber ?? null,
     showTotals: current.showTotals !== false,
+    includeProductDetails: current.includeProductDetails !== false,
   };
 }
 
@@ -250,6 +255,7 @@ function buildQuoteContentSnapshotFromQuote(q: Quote) {
     installationTerms: q.installationTerms ?? "",
     quoteNumber: q.quoteNumber ?? null,
     showTotals: q.showTotals !== false,
+    includeProductDetails: q.includeProductDetails !== false,
   };
 }
 
@@ -372,6 +378,7 @@ function saveQuoteToState(
     installationTerms: withCustomer.current.installationTerms,
     quoteNumber: documentType === "quote" ? quoteNumber : existingQuote?.quoteNumber,
     showTotals: withCustomer.current.showTotals,
+    includeProductDetails: withCustomer.current.includeProductDetails,
     totals,
   };
 
@@ -490,17 +497,13 @@ export default function App() {
     });
   }, [state.profiles]);
 
-  // When active profile changes, sync to item editor (name + price)
+  // When active profile changes, sync to item editor (name + price per m²).
+  // A chosen catalog profile is always an area rate: width × height × price per m².
   useEffect(() => {
     const p = state.profiles.find((pr) => pr.id === activeProfileId);
     const preserveUnitPrice = skipProfileUnitPriceSyncRef.current;
     skipProfileUnitPriceSyncRef.current = false;
-    setItemEditor((e) => ({
-      ...e,
-      profileId: p?.id,
-      profileName: p?.name ?? undefined,
-      unitPrice: preserveUnitPrice ? e.unitPrice : p ? String(p.unitPrice) : "0",
-    }));
+    setItemEditor((e) => lineAfterProfileSync(e, p, preserveUnitPrice));
   }, [activeProfileId, state.profiles]);
 
   const rfqSlice: RfqSlice = {
@@ -632,8 +635,12 @@ export default function App() {
   function editItem(id: string) {
     const item = state.current.items.find((it) => it.id === id);
     if (!item) return;
-    skipProfileUnitPriceSyncRef.current = true;
-    setItemEditor({ ...item });
+    // Skip the catalog overwrite only when this open actually changes the selected profile.
+    // An imported window with no profile leaves the selection unchanged, so the flag must stay
+    // clear — otherwise the next manual profile choice keeps the zero price.
+    const profile = state.profiles.find((p) => p.id === item.profileId);
+    skipProfileUnitPriceSyncRef.current = item.profileId !== activeProfileId;
+    setItemEditor(lineAfterProfileSync(item, profile, true));
     setActiveProfileId(item.profileId);
   }
 
@@ -829,6 +836,7 @@ export default function App() {
           taxPercentText: savedPrev.current.taxPercentText || "18",
           notes: opts.notes ?? "",
           showTotals: true,
+          includeProductDetails: true,
         },
       };
       return saveQuoteToState(withDraft).nextState;
@@ -871,6 +879,7 @@ export default function App() {
         quoteNumber: q.quoteNumber,
         notes: q.notes ?? "",
         showTotals: q.showTotals !== false,
+        includeProductDetails: q.includeProductDetails !== false,
       },
       };
     });
@@ -987,6 +996,8 @@ export default function App() {
           dimensionUnit: nextState.dimensionUnit ?? "cm",
           pdfDateMs: quote?.date,
           quoteUnchanged: quoteUnchanged === true,
+          profiles: nextState.profiles,
+          manufacturers: nextState.manufacturers,
         })
       );
 
@@ -995,12 +1006,7 @@ export default function App() {
         return;
       }
 
-      showToast(
-        result.reusedExisting
-          ? "נפתח הקובץ הקיים. התיקייה נפתחה עם הקובץ."
-          : "ה-PDF נשמר בהצלחה. התיקייה נפתחה עם הקובץ.",
-        "success"
-      );
+      showToast("ה-PDF נשמר ונפתח — אותו מסמך כמו בהדפסה.", "success");
     } catch (err: any) {
       const msg = err?.message || String(err) || "שגיאה ביצוא PDF";
       showToast(msg, "error");
@@ -1030,6 +1036,8 @@ export default function App() {
           pdfSaveFolder: nextState.pdfSaveFolder,
           dimensionUnit: nextState.dimensionUnit ?? "cm",
           pdfDateMs: quote?.date,
+          profiles: nextState.profiles,
+          manufacturers: nextState.manufacturers,
         })
       );
 
@@ -1078,7 +1086,10 @@ export default function App() {
     id?: string;
     name: string;
     unitPrice: string;
+    manufacturerId?: string;
   }>({ name: "", unitPrice: "" });
+  const [companyDraft, setCompanyDraft] = useState<{ name: string; logoUrl?: string }>({ name: "" });
+  const companyLogoInputRef = useRef<HTMLInputElement>(null);
 
   /** Inline edit in profiles table: which cell (profile id + field) and draft value */
   const [editingProfileCell, setEditingProfileCell] = useState<{ id: string; field: "name" | "unitPrice" } | null>(null);
@@ -1165,21 +1176,68 @@ export default function App() {
   function addProfile() {
     const name = profileDraft.name.trim() || `פרופיל חדש`;
     const unitPrice = parseLooseNumber(profileDraft.unitPrice) || 0;
+    const manufacturerId = profileDraft.manufacturerId;
     setState((s) => ({
       ...s,
-      profiles: [...s.profiles, { id: uuid(), name, unitPrice }],
+      profiles: [...s.profiles, { id: uuid(), name, unitPrice, manufacturerId }],
     }));
-    setProfileDraft({ name: "", unitPrice: "" });
+    setProfileDraft({ name: "", unitPrice: "", manufacturerId });
+  }
+
+  function setProfileManufacturer(id: string, manufacturerId: string | undefined) {
+    setState((s) => ({
+      ...s,
+      profiles: s.profiles.map((p) => (p.id === id ? { ...p, manufacturerId } : p)),
+    }));
+  }
+
+  async function pickCompanyLogo(file: File | undefined) {
+    if (!file) return;
+    try {
+      const logoUrl = await logoFileToPngDataUrl(file);
+      setCompanyDraft((d) => ({ ...d, logoUrl }));
+    } catch {
+      showToast("לא ניתן לקרוא את קובץ הלוגו. בחר/י קובץ תמונה (PNG, JPG, SVG).", "error");
+    }
+  }
+
+  function addCompany() {
+    const name = companyDraft.name.trim();
+    if (!name) {
+      showToast("אנא הזן/י שם חברה", "error");
+      return;
+    }
+    setState((s) => ({
+      ...s,
+      manufacturers: [...s.manufacturers, { id: `mfr-${uuid()}`, name, logoUrl: companyDraft.logoUrl }],
+    }));
+    setCompanyDraft({ name: "" });
+    if (companyLogoInputRef.current) companyLogoInputRef.current.value = "";
+  }
+
+  async function deleteCompany(id: string) {
+    const company = state.manufacturers.find((m) => m.id === id);
+    if (!company || company.builtin) return;
+    const used = state.profiles.filter((p) => p.manufacturerId === id).length;
+    const confirmed = await confirmDestructive(
+      `האם למחוק את החברה "${company.name}"?${used ? ` ${used} פרופילים יישארו ללא חברה.` : ""}`
+    );
+    if (!confirmed) return;
+    setState((s) => ({
+      ...s,
+      manufacturers: s.manufacturers.filter((m) => m.id !== id),
+      profiles: s.profiles.map((p) => (p.manufacturerId === id ? { ...p, manufacturerId: undefined } : p)),
+    }));
   }
 
   /** Add a profile from the quote page dropdown; returns the new profile id and selects it. */
-  function addProfileQuick(name: string, unitPrice: number): string {
+  function addProfileQuick(name: string, unitPrice: number, manufacturerId?: string): string {
     const trimmedName = name.trim() || `פרופיל חדש`;
     const price = parseLooseNumber(String(unitPrice)) || 0;
     const id = uuid();
     setState((s) => ({
       ...s,
-      profiles: [...s.profiles, { id, name: trimmedName, unitPrice: price }],
+      profiles: [...s.profiles, { id, name: trimmedName, unitPrice: price, manufacturerId }],
     }));
     setActiveProfileId(id);
     setItemEditor((e) => ({
@@ -1187,18 +1245,19 @@ export default function App() {
       profileId: id,
       profileName: trimmedName,
       unitPrice: String(price),
+      priceBasis: "per_m2",
     }));
     return id;
   }
 
   /** Update an existing profile from the quote page profile popup; keeps row labels in sync by profile id. */
-  function updateProfileQuick(id: string, name: string, unitPrice: number) {
+  function updateProfileQuick(id: string, name: string, unitPrice: number, manufacturerId?: string) {
     const trimmedName = name.trim() || `פרופיל חדש`;
     const price = parseLooseNumber(String(unitPrice)) || 0;
     setState((s) => ({
       ...s,
       profiles: s.profiles.map((p) =>
-        p.id === id ? { ...p, name: trimmedName, unitPrice: price } : p
+        p.id === id ? { ...p, name: trimmedName, unitPrice: price, manufacturerId } : p
       ),
       current: {
         ...s.current,
@@ -1212,12 +1271,13 @@ export default function App() {
         ...e,
         profileName: trimmedName,
         unitPrice: String(price),
+        priceBasis: "per_m2",
       }));
     }
   }
   function editProfile(p: Profile) {
     setAddonDraft({ name: "", price: "" }); // exit addon edit mode
-    setProfileDraft({ id: p.id, name: p.name, unitPrice: String(p.unitPrice) });
+    setProfileDraft({ id: p.id, name: p.name, unitPrice: String(p.unitPrice), manufacturerId: p.manufacturerId });
     setTimeout(() => profileFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   }
   function saveProfileEdit() {
@@ -1230,6 +1290,7 @@ export default function App() {
               ...p,
               name: profileDraft.name.trim() || p.name,
               unitPrice: parseLooseNumber(profileDraft.unitPrice),
+              manufacturerId: profileDraft.manufacturerId,
             }
           : p
       ),
@@ -1378,23 +1439,23 @@ export default function App() {
     <div className="container-app">
       <main className="w-full min-w-0 max-w-[1160px] flex flex-col gap-4 px-2">
         {/* Top Bar */}
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0 sm:min-w-fit flex-1">
+        <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 w-full min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 max-w-full">
             <CompanyLogo size="header" />
-            <h1 className="text-xl sm:text-3xl font-semibold min-w-0 break-words sm:whitespace-nowrap">
+            <h1 className="text-xl sm:text-3xl font-semibold min-w-0 leading-tight">
               אלום סמעאן סאמי
             </h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
             <button
               className="hidden sm:inline-flex px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm hover:opacity-95"
               onClick={startNewEmptyQuote}
             >
               הצעה חדשה
             </button>
-            <nav className="flex gap-2 rounded-xl p-1 bg-white/70 shadow">
+            <nav className="flex flex-wrap gap-1 sm:gap-2 rounded-xl p-1 bg-white/70 shadow max-w-full">
               <button
-                className={`px-3 py-1.5 rounded-lg text-sm ${
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-sm ${
                   state.ui.tab === "quote"
                     ? "bg-sky-500 text-white"
                     : "hover:bg-slate-100"
@@ -1406,7 +1467,7 @@ export default function App() {
                 הצעה
               </button>
               <button
-                className={`px-3 py-1.5 rounded-lg text-sm ${
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-sm ${
                   state.ui.tab === "customers"
                     ? "bg-sky-500 text-white"
                     : "hover:bg-slate-100"
@@ -1421,7 +1482,7 @@ export default function App() {
                 לקוחות
               </button>
               <button
-                className={`px-3 py-1.5 rounded-lg text-sm ${
+                className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-sm ${
                   state.ui.tab === "rfq"
                     ? "bg-sky-500 text-white"
                     : "hover:bg-slate-100"
@@ -1435,7 +1496,7 @@ export default function App() {
               </button>
             </nav>
             <button
-              className="inline-flex items-center justify-center gap-2 px-4 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100 text-sm font-medium shadow-sm"
+              className="inline-flex items-center justify-center gap-2 px-3 sm:px-4 py-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100 text-sm font-medium shadow-sm"
               onClick={openSettings}
               title="הגדרות"
               aria-label="הגדרות"
@@ -1631,6 +1692,67 @@ export default function App() {
             }
           >
             <div className="modal-body p-3 sm:p-4 space-y-3 sm:space-y-4 overflow-y-auto max-h-[80vh]">
+              {/* Aluminium system companies (logo shown per profile, in the quote and in the PDF) */}
+              <div className="border rounded-lg p-3 sm:p-4 bg-slate-50 border-slate-200 space-y-3">
+                <div>
+                  <div className="text-base font-semibold text-slate-800">חברות (מערכות אלומיניום)</div>
+                  <div className="text-sm text-slate-600">
+                    לכל פרופיל אפשר לבחור חברה. הלוגו שלה יוצג בהצעה וב-PDF. פרופיל בלי חברה — לא יוצג לוגו.
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {state.manufacturers.map((m) => (
+                    <div key={m.id} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                      <ManufacturerBadge manufacturer={m} className="h-7" />
+                      <span className="text-sm text-slate-700">{m.name}</span>
+                      <span className="text-xs text-slate-500">
+                        ({state.profiles.filter((p) => p.manufacturerId === m.id).length})
+                      </span>
+                      {!m.builtin && (
+                        <button
+                          type="button"
+                          className="text-xs text-red-600 hover:underline"
+                          onClick={() => deleteCompany(m.id)}
+                        >
+                          מחיקה
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 items-end">
+                  <SettingsInput
+                    label="שם חברה חדשה"
+                    value={companyDraft.name}
+                    onChange={(v) => setCompanyDraft((d) => ({ ...d, name: v }))}
+                  />
+                  <label className="grid gap-1.5">
+                    <span className="text-sm text-slate-700">לוגו (תמונה)</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        ref={companyLogoInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="text-sm min-w-0 flex-1"
+                        onChange={(e) => pickCompanyLogo(e.target.files?.[0])}
+                      />
+                      {companyDraft.logoUrl && (
+                        <img src={companyDraft.logoUrl} alt="" className="h-7 w-auto max-w-[100px] object-contain" />
+                      )}
+                    </div>
+                  </label>
+                  <div>
+                    <button
+                      type="button"
+                      className="px-3 py-2 rounded-lg bg-sky-500 text-white text-sm sm:text-base"
+                      onClick={addCompany}
+                    >
+                      הוספת חברה
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div ref={profileFormRef} className="text-sm sm:text-base text-slate-600">
                 הוספה/עריכה של פרופילים (למשל 4300, 7300) עם מחיר למ״ר.
                 {profileDraft.id && (
@@ -1638,7 +1760,16 @@ export default function App() {
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
+              <div className="space-y-2">
+                <label className="grid gap-1.5 max-w-xs">
+                  <span className="text-sm text-slate-700">חברה</span>
+                  <CompanySelect
+                    value={profileDraft.manufacturerId}
+                    manufacturers={state.manufacturers}
+                    onChange={(id) => setProfileDraft({ ...profileDraft, manufacturerId: id })}
+                  />
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
                 <SettingsInput
                   label="שם פרופיל"
                   value={profileDraft.name}
@@ -1679,14 +1810,22 @@ export default function App() {
                     ניקוי
                   </button>
                 </div>
+                </div>
               </div>
 
-              <div className="border rounded-lg overflow-x-auto">
-                <table className="w-full text-sm min-w-[400px]">
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm table-fixed">
+                  <colgroup>
+                    <col className="w-[46%]" />
+                    <col className="w-[7.5rem]" />
+                    <col className="w-[8.5rem]" />
+                    <col className="w-[4.5rem]" />
+                  </colgroup>
                   <thead className="bg-slate-50">
                     <tr>
                       <ThSettings>שם</ThSettings>
                       <ThSettings>מחיר למ״ר</ThSettings>
+                      <ThSettings>חברה</ThSettings>
                       <ThSettings>פעולות</ThSettings>
                     </tr>
                   </thead>
@@ -1694,16 +1833,32 @@ export default function App() {
                     {state.profiles.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={3}
+                          colSpan={4}
                           className="py-6 text-center text-slate-500"
                         >
                           אין פרופילים
                         </td>
                       </tr>
                     ) : (
-                      state.profiles.map((p) => (
+                      groupProfilesByManufacturer(state.profiles, state.manufacturers).flatMap((group) => [
+                        <tr key={`group-${group.manufacturer?.id ?? "none"}`} className="border-t bg-slate-100/70">
+                          <td colSpan={4} className="px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              {group.manufacturer ? (
+                                <>
+                                  <ManufacturerBadge manufacturer={group.manufacturer} className="h-6" />
+                                  <span className="font-semibold text-slate-800">{group.manufacturer.name}</span>
+                                </>
+                              ) : (
+                                <span className="font-semibold text-slate-600">ללא חברה</span>
+                              )}
+                              <span className="text-xs text-slate-500">({group.profiles.length})</span>
+                            </div>
+                          </td>
+                        </tr>,
+                        ...group.profiles.map((p) => (
                         <tr key={p.id} className="border-t">
-                          <TdSettings>
+                          <TdSettings className="whitespace-normal">
                             {editingProfileCell?.id === p.id && editingProfileCell?.field === "name" ? (
                               <input
                                 type="text"
@@ -1753,17 +1908,24 @@ export default function App() {
                             )}
                           </TdSettings>
                           <TdSettings>
-                            <div className="flex flex-wrap gap-1 sm:gap-2">
-                              <button
-                                className="px-2 sm:px-3 py-1.5 rounded-md bg-red-600 text-white text-xs sm:text-sm"
-                                onClick={() => deleteProfile(p.id)}
-                              >
-                                מחיקה
-                              </button>
-                            </div>
+                            <CompanySelect
+                              showLogo={false}
+                              value={p.manufacturerId}
+                              manufacturers={state.manufacturers}
+                              onChange={(id) => setProfileManufacturer(p.id, id)}
+                            />
+                          </TdSettings>
+                          <TdSettings>
+                            <button
+                              className="px-2 py-1.5 rounded-md bg-red-600 text-white text-xs"
+                              onClick={() => deleteProfile(p.id)}
+                            >
+                              מחיקה
+                            </button>
                           </TdSettings>
                         </tr>
-                      ))
+                        )),
+                      ])
                     )}
                   </tbody>
                 </table>
@@ -1975,9 +2137,9 @@ function ThSettings({ children }: { children: React.ReactNode }) {
     </th>
   );
 }
-function TdSettings({ children }: { children: React.ReactNode }) {
+function TdSettings({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <td className="text-right px-2 sm:px-3 py-2 align-top whitespace-nowrap text-xs sm:text-sm">
+    <td className={`text-right px-2 py-1.5 align-middle whitespace-nowrap text-xs sm:text-sm ${className}`}>
       {children}
     </td>
   );

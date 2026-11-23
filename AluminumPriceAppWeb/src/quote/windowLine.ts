@@ -65,7 +65,7 @@ export function lineItemFromWindow(
     customerDescription: cfg.customDescription,
     configuration: cfg,
     configurationNeedsReview: cfg.openingType === "custom" && Boolean(cfg.referenceImage),
-    addons: addons.map((addon) => ({ ...addon, id: newId(), checked: false })),
+    addons: addons.map((addon) => ({ ...addon, checked: false })),
     subtotal: 0,
   };
   return withSubtotal(item);
@@ -145,6 +145,29 @@ export function applyProfileToLineItem(item: LineItem, profile: Profile): LineIt
     priceBasis: "per_m2",
     manualUnitPrice: undefined,
   });
+}
+
+/**
+ * Keep a line's own m² rate when the editor is opened on a profile it already uses.
+ * A zero rate is not a custom price: take the catalog rate and price the window by area.
+ */
+export function lineAfterProfileSync(item: LineItem, profile: Profile | undefined, preserveUnitPrice: boolean): LineItem {
+  const catalogHasRate = Boolean(profile && profile.unitPrice > 0);
+  const keepExistingRate = preserveUnitPrice && !(catalogHasRate && parseLooseNumber(item.unitPrice) === 0);
+  if (keepExistingRate) {
+    if (!profile) return { ...item, profileId: undefined, profileName: undefined };
+    const manual = (item.manualUnitPrice ?? "").trim();
+    return withSubtotal({
+      ...item,
+      profileId: profile.id,
+      profileName: profile.name,
+      priceBasis: manual ? item.priceBasis : "per_m2",
+    });
+  }
+  if (!profile) {
+    return { ...item, profileId: undefined, profileName: undefined, unitPrice: "0" };
+  }
+  return applyProfileToLineItem(item, profile);
 }
 
 /**

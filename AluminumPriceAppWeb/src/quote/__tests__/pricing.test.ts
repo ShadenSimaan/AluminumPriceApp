@@ -3,6 +3,7 @@ import { customerUnitFromSupplierCost, isOpenAreaRate, lineTotal, lineUnitPrice,
 import {
   applyProfileToLineItem,
   collectQuoteProfileSources,
+  lineAfterProfileSync,
   profileOfferLine,
   remapQuoteItems,
 } from "../windowLine";
@@ -99,6 +100,66 @@ describe("customer prices", () => {
     expect(collectQuoteProfileSources([remapped])).toEqual([
       expect.objectContaining({ key: "b", profileName: "4300", count: 1 }),
     ]);
+  });
+
+  it("fills a zero rate from the profile and prices the window by its dimensions", () => {
+    const line: LineItem = {
+      id: "1",
+      widthCm: "403",
+      heightCm: "295",
+      qty: "1",
+      unitPrice: "0",
+      priceBasis: "per_unit",
+      location: "כניסה מרתף",
+      addons: [],
+      subtotal: 0,
+    };
+    const profile: Profile = { id: "door", name: "דלת 5600 עם תריס אור", unitPrice: 2700 };
+    const synced = lineAfterProfileSync(line, profile, true);
+    expect(synced.profileName).toBe("דלת 5600 עם תריס אור");
+    expect(synced.unitPrice).toBe("2700");
+    expect(synced.priceBasis).toBe("per_m2");
+    expect(lineTotal(synced)).toBeCloseTo((403 * 295) / 10000 * 2700, 2);
+  });
+
+  it("prices an imported profile rate by area instead of once per window", () => {
+    const profile: Profile = { id: "p5600", name: "5600 כנף ורשת ותריס אור", unitPrice: 2700 };
+    const line: LineItem = {
+      id: "1",
+      widthCm: "352",
+      heightCm: "290",
+      qty: "1",
+      profileId: profile.id,
+      profileName: profile.name,
+      unitPrice: "2700",
+      priceBasis: "per_unit",
+      location: "חדר גג",
+      addons: [],
+      subtotal: 2700,
+    };
+    const synced = lineAfterProfileSync(line, profile, true);
+    expect(synced.priceBasis).toBe("per_m2");
+    expect(synced.unitPrice).toBe("2700");
+    expect(lineTotal(synced)).toBeCloseTo((352 * 290) / 10000 * 2700, 2);
+  });
+
+  it("keeps a custom square-metre rate already stored on the line", () => {
+    const profile: Profile = { id: "door", name: "דלת 5600 עם תריס אור", unitPrice: 2700 };
+    const line: LineItem = {
+      id: "1",
+      widthCm: "100",
+      heightCm: "100",
+      qty: "1",
+      profileId: profile.id,
+      profileName: profile.name,
+      unitPrice: "1500",
+      priceBasis: "per_m2",
+      addons: [],
+      subtotal: 0,
+    };
+    const synced = lineAfterProfileSync(line, profile, true);
+    expect(synced.unitPrice).toBe("1500");
+    expect(lineTotal(synced)).toBe(1500);
   });
 
   it("leaves unmapped lines alone when remapping profiles", () => {

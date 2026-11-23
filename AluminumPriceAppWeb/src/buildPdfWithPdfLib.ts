@@ -5,10 +5,11 @@
  */
 import type { PdfQuotePayload, PdfLineItem, PdfFreeFormAddition } from "./pdfExporter";
 import { ADDITION_PROFILE_LABEL, documentTypeLabel, normalizeDocumentType } from "./types";
-import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { isOpenAreaRate, lineTotal as pricedLineTotal, lineUnitPrice, parseLooseNumber, quoteMoney } from "./quote/pricing";
 import { drawQuoteProducts } from "./quote/quotePdfProducts";
+import { imageKind, loadLogoBytes } from "./quote/manufacturers";
 import { drawCompanyLogoHeader, embedCompanyLogo } from "./brand/logoAsset";
 
 const A4_WIDTH = 595.28;
@@ -28,10 +29,15 @@ const HEBREW_FONT_URLS = [
 /** Match Hebrew and symbols like ₪ */
 const HEBREW_OR_SYMBOL = /[\u0590-\u05FF\uFB1D-\uFB4F\u20AA]/;
 
+/** Spaces that may wrap. A non-breaking space keeps a price such as "(650 ₪)" on one line. */
+function splitWords(text: string): string[] {
+  return text.split(/[^\S\u00A0]+/).filter((word) => word.length > 0);
+}
+
 /** Reverse word order for RTL – words are correct but sentence order is opposite. */
 function reverseWordOrder(text: string): string {
   if (!text || !HEBREW_OR_SYMBOL.test(text)) return text;
-  return text.split(/\s+/).reverse().join(" ");
+  return splitWords(text).reverse().join(" ");
 }
 
 /** True if segment should use Hebrew font (has Hebrew or ₪) */
@@ -209,6 +215,42 @@ function drawTextRight(
   }
 }
 
+/**
+ * Draw one table-cell line right-aligned. Words separated by a non-breaking space (for example
+ * "(650 ₪)") are kept together as one unit so the price is not split or reversed.
+ */
+function drawCellText(
+  page: PDFPage,
+  hebrewFont: PDFFont,
+  latinFont: PDFFont,
+  size: number,
+  text: string,
+  xRight: number,
+  y: number,
+  color = rgb(0, 0, 0)
+): void {
+  const rtlToken = (token: string): string => {
+    // Hebrew joined to other text without spaces (e.g. "סמפי/נייס") must flip its parts for RTL.
+    // Tokens with digits (prices, sizes) keep their order.
+    if (!HEBREW_OR_SYMBOL.test(token) || /\d/.test(token)) return token;
+    const parts = segmentForFonts(token).map((s) => s.text);
+    if (parts.length < 2) return token;
+    return parts
+      .reverse()
+      .join("")
+      .replace(/[()]/g, (ch) => (ch === "(" ? ")" : "("));
+  };
+  const ordered = HEBREW_OR_SYMBOL.test(text) ? splitWords(text).reverse().map(rtlToken).join(" ") : text;
+  const segments = segmentForFonts(ordered.replace(/\u00A0/g, " "));
+  let x = xRight;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const { text: seg, useHebrew } = segments[i];
+    const font = useHebrew ? hebrewFont : latinFont;
+    x -= font.widthOfTextAtSize(seg, size);
+    page.drawText(seg, { x, y, size, font, color });
+  }
+}
+
 /** Draw text centered; dual font. Uses RTL placement (right-to-left) so colons render correctly after Hebrew words. */
 function drawTextCenter(
   page: PDFPage,
@@ -263,10 +305,13 @@ function breakLongWord(
   return chunks;
 }
 
-/** Wrap text to fit width (words first; overlong tokens are split by character). */
+/** Wrap text to fit width (words first; overlong tokens are split by character). Newlines force a new line. */
 function wrapText(hebrewFont: PDFFont, latinFont: PDFFont, size: number, text: string, maxWidth: number): string[] {
   if (!text) return [];
-  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  if (text.includes("\n")) {
+    return text.split(/\n/).flatMap((part) => wrapText(hebrewFont, latinFont, size, part, maxWidth));
+  }
+  const words = splitWords(text);
   const lines: string[] = [];
   let line = "";
   const pushLine = () => {
@@ -307,7 +352,7 @@ function wrapTextVariableWidth(
   text: string,
   maxWidthForLine: (lineIndex: number) => number
 ): string[] {
-  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  const words = splitWords(text);
   const lines: string[] = [];
   let line = "";
   let lineIndex = 0;
@@ -466,10 +511,48 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     drawTextRight(page, hebrewFont, latinFont, 11, payload.customerEmail.trim(), right, y);
     y -= 15;
   }
+
+  const items = payload.items || [];
+
+  // Profile companies used in this quote, by logo (name when a logo is unavailable).
+  const companies = items.flatMap((it, i) =>
+    it.manufacturer && items.findIndex((o) => o.manufacturer?.id === it.manufacturer!.id) === i ? [it.manufacturer] : []
+  );
+  const companyLogos = new Map<string, PDFImage>();
+  for (const company of companies) {
+    if (!company.logoUrl) continue;
+    const bytes = await loadLogoBytes(company.logoUrl);
+    const kind = bytes ? imageKind(bytes) : null;
+    if (bytes && kind) companyLogos.set(company.id, kind === "png" ? await doc.embedPng(bytes) : await doc.embedJpg(bytes));
+  }
+  if (companies.length) {
+    const LOGO_H = 22;
+    const label = companies.length > 1 ? "מערכות אלומיניום" : "מערכת אלומיניום";
+    const labelSize = 11;
+    y -= 4;
+    const rowMid = y - LOGO_H / 2 + 4;
+    drawTextRight(page, hebrewFont, latinFont, labelSize, label, right, rowMid - 4);
+    let x = right - textWidth(hebrewFont, latinFont, labelSize, label) - 14;
+    for (const company of companies) {
+      const logo = companyLogos.get(company.id);
+      if (logo) {
+        const w = Math.min(110, (logo.width / logo.height) * LOGO_H);
+        const h = (logo.height / logo.width) * w;
+        if (x - w < MARGIN_X) break;
+        page.drawImage(logo, { x: x - w, y: rowMid - h / 2, width: w, height: h });
+        x -= w + 18;
+      } else {
+        const w = textWidth(hebrewFont, latinFont, 12, company.name);
+        if (x - w < MARGIN_X) break;
+        drawTextRight(page, hebrewFont, latinFont, 12, company.name, x, rowMid - 4);
+        x -= w + 18;
+      }
+    }
+    y -= LOGO_H + 6;
+  }
   drawRule(0.8, rgb(0.03, 0.4, 0.62));
 
   // Items table
-  const items = payload.items || [];
   const additions = payload.freeFormAdditions || [];
   const dimUnit = payload.dimensionUnit ?? "cm";
   const taxRate = normalizeTax(parseNum(payload.taxPercentText));
@@ -489,21 +572,18 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const totalText = rateOnly ? "—" : `${formatNum(lineTotal)} ₪`;
     const profileStr = it.profileName || "";
     const locationStr = it.location || "";
-    const detailsStr = [it.details, (it.addons || []).filter((a) => a.checked).map((a) => `${a.name}`).join(" • ")]
-      .filter(Boolean)
-      .join(" — ");
-    return { dims, qty, perItem, lineTotal, unitPriceText, totalText, rateOnly, profileStr, locationStr, detailsStr };
+    const addonLines = (it.addons || [])
+      .filter((a) => a.checked)
+      .map((a) => `${a.name} (${formatNum(parseLooseNumber(a.price))}\u00A0₪)`);
+    const detailsStr = [it.details?.trim(), ...addonLines].filter(Boolean).join("\n");
+    // With several companies in one quote, each row names its company under the profile.
+    const company = companies.length > 1 ? it.manufacturer : undefined;
+    return { dims, qty, perItem, lineTotal, unitPriceText, totalText, rateOnly, profileStr, locationStr, detailsStr, company };
   });
 
-  const BODY_SIZE = 12;
-  const HEADER_SIZE = 12;
   const CELL_PAD = 10;
   const tableWidth = right - MARGIN_X;
   const dimsHeader = dimUnit === "mm" ? "מידות (מ״מ)" : "מידות (ס״מ)";
-  const measure = (t: string, size = BODY_SIZE) => (t ? textWidth(hebrewFont, latinFont, size, t) : 0);
-  const longestWord = (t: string) => Math.max(0, ...t.split(/\s+/).map((word) => measure(word)));
-  const fitColumn = (header: string, values: string[]) =>
-    Math.ceil(Math.max(measure(header, HEADER_SIZE), ...values.map((v) => measure(v))) + CELL_PAD);
 
   const numValues = [...rows.map((_, i) => String(i + 1)), ...additions.map((_, i) => String(items.length + i + 1))];
   const unitPriceValues = [...rows.map((r) => r.unitPriceText), ...additions.map((a) => formatNum(parseNum(a.price)))];
@@ -519,92 +599,90 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     ...(showTotalsBox ? [] : lineTotals.map((t) => formatNum(t * (1 + taxRate)) + " ₪")),
   ];
 
-  const colW = {
-    num: fitColumn("מס׳", numValues),
-    profile: 0,
-    dims: fitColumn(dimsHeader, rows.map((r) => r.dims)),
-    location: 0,
-    details: 0,
-    unitPrice: fitColumn("מחיר ליח׳", unitPriceValues),
-    qty: fitColumn("כמות", qtyValues),
-    total: fitColumn("סה״כ", totalValues),
-  };
-
-  // Text columns share the remaining width: each gets at least its header / longest word, then the
-  // profile is widened toward one line (up to PROFILE_MAX_SHARE of the table), then the rest is shared.
-  const PROFILE_MAX_SHARE = 0.4;
+  // Column layout: every column tries to fit its content on one line. Money, quantity, number and
+  // dimensions are never wrapped; when the table is too wide the font steps down first, and only
+  // then do the text columns (details, location, profile) wrap — at word boundaries, never inside a price.
   const locationHasContent = rows.some((r) => r.locationStr.trim());
   const detailsHasContent =
     rows.some((r) => r.detailsStr.trim()) || additions.some((a) => (a.name || "").trim());
-  const flexCols = [
+  const textColumns = [
     {
       key: "profile" as const,
       header: "פרופיל",
-      texts: [...rows.map((r) => r.profileStr), ...(additions.length ? [ADDITION_PROFILE_LABEL] : [])],
+      texts: [
+        ...rows.flatMap((r) => [r.profileStr, ...(r.company && !companyLogos.get(r.company.id) ? [r.company.name] : [])]),
+        ...(additions.length ? [ADDITION_PROFILE_LABEL] : []),
+      ],
       hide: false,
     },
-    {
-      key: "location" as const,
-      header: "מיקום",
-      texts: rows.map((r) => r.locationStr),
-      hide: !locationHasContent,
-    },
+    { key: "location" as const, header: "מיקום", texts: rows.map((r) => r.locationStr), hide: !locationHasContent },
     {
       key: "details" as const,
       header: "פרטים",
-      texts: [...rows.map((r) => r.detailsStr), ...additions.map((a) => a.name || "")],
+      texts: [...rows.flatMap((r) => r.detailsStr.split("\n")), ...additions.map((a) => a.name || "")],
       hide: !detailsHasContent,
     },
-  ].map((c) => {
-    if (c.hide) return { ...c, min: 0, natural: 0 };
-    const min = Math.ceil(Math.max(measure(c.header, HEADER_SIZE), ...c.texts.map(longestWord), 0) + CELL_PAD);
-    const natural = Math.ceil(Math.max(min, ...c.texts.map((t) => measure(t) + CELL_PAD)));
-    return { ...c, min, natural };
-  });
-  const fixedW = colW.num + colW.dims + colW.unitPrice + colW.qty + colW.total;
-  let remaining = tableWidth - fixedW;
-  flexCols.forEach((c) => {
-    colW[c.key] = c.min;
-    remaining -= c.min;
-  });
-  if (remaining > 0) {
-    const profileTarget = Math.max(colW.profile, Math.min(flexCols[0].natural, tableWidth * PROFILE_MAX_SHARE));
-    const add = Math.min(remaining, profileTarget - colW.profile);
-    colW.profile += add;
-    remaining -= add;
-  }
-  for (let pass = 0; pass < 4 && remaining > 0.5; pass++) {
-    const needy = flexCols.filter((c) => !c.hide && colW[c.key] < c.natural);
-    if (!needy.length) break;
-    let given = 0;
-    needy.forEach((c) => {
-      const add = Math.min(c.natural - colW[c.key], remaining / needy.length);
-      colW[c.key] += add;
-      given += add;
+  ];
+
+  const layoutAt = (size: number) => {
+    const headerSize = Math.min(11, size + 0.5);
+    const measure = (t: string, s = size) => (t ? textWidth(hebrewFont, latinFont, s, t) : 0);
+    const fit = (header: string, values: string[]) =>
+      Math.ceil(Math.max(measure(header, headerSize), ...values.map((v) => measure(v))) + CELL_PAD);
+    const widths = {
+      num: fit("מס׳", numValues),
+      profile: 0,
+      dims: Math.ceil(Math.max(measure(dimsHeader, Math.min(10, headerSize)), ...rows.map((r) => measure(r.dims))) + CELL_PAD),
+      location: 0,
+      details: 0,
+      unitPrice: fit("מחיר ליח׳", unitPriceValues),
+      qty: fit("כמות", qtyValues),
+      total: fit("סה״כ", totalValues),
+    };
+    const text = textColumns.map((c) => {
+      if (c.hide) return { key: c.key, natural: 0, min: 0 };
+      const longestToken = Math.max(0, ...c.texts.flatMap((t) => splitWords(t).map((w) => measure(w))));
+      const headerW = measure(c.header, headerSize);
+      const min = Math.ceil(Math.max(headerW, longestToken) + CELL_PAD);
+      const natural = Math.ceil(Math.max(min, ...c.texts.map((t) => measure(t) + CELL_PAD)));
+      return { key: c.key, natural, min };
     });
-    remaining -= given;
+    const fixed = widths.num + widths.dims + widths.unitPrice + widths.qty + widths.total;
+    const naturalSum = fixed + text.reduce((s, c) => s + c.natural, 0);
+    return { size, headerSize, widths, text, fixed, naturalSum };
+  };
+
+  const SIZES = [11, 10.5, 10, 9.5, 9, 8.5, 8];
+  let layout = layoutAt(SIZES[SIZES.length - 1]);
+  for (const s of SIZES) {
+    const candidate = layoutAt(s);
+    if (candidate.naturalSum <= tableWidth) {
+      layout = candidate;
+      break;
+    }
   }
-  if (remaining > 0) {
-    // Prefer giving leftover width to visible text columns (profile first).
-    const visible = flexCols.filter((c) => !c.hide);
-    if (visible.length === 1) colW[visible[0].key] += remaining;
-    else if (visible.length > 1) {
-      colW.profile += remaining * 0.6;
-      const other = visible.find((c) => c.key !== "profile");
-      if (other) colW[other.key] += remaining * 0.4;
-      else colW.profile += remaining * 0.4;
-    } else {
-      colW.profile += remaining;
-    }
-  } else if (remaining < 0) {
-    // Content too wide even at minimums: shrink visible text columns proportionally.
-    const flexSum = colW.profile + colW.location + colW.details;
-    if (flexSum > 0) {
-      const scale = (flexSum + remaining) / flexSum;
-      colW.profile *= scale;
-      colW.location *= scale;
-      colW.details *= scale;
-    }
+  const FS = layout.size;
+  const HEADER_FS = layout.headerSize;
+  const colW = { ...layout.widths };
+  const available = tableWidth - layout.fixed;
+  const visibleText = layout.text.filter((c) => c.natural > 0);
+  const naturalText = visibleText.reduce((s, c) => s + c.natural, 0);
+  if (naturalText <= available) {
+    // Everything fits on one line: share the spare width among the text columns.
+    const spare = available - naturalText;
+    visibleText.forEach((c) => {
+      colW[c.key] = c.natural + (naturalText > 0 ? (spare * c.natural) / naturalText : spare / visibleText.length);
+    });
+  } else {
+    // Still too wide at the smallest size: shrink text columns toward their longest word, widest first.
+    const slack = visibleText.reduce((s, c) => s + (c.natural - c.min), 0);
+    const over = naturalText - available;
+    visibleText.forEach((c) => {
+      const cut = slack > 0 ? Math.min(c.natural - c.min, (over * (c.natural - c.min)) / slack) : 0;
+      colW[c.key] = c.natural - cut;
+    });
+    const used = visibleText.reduce((s, c) => s + colW[c.key], 0);
+    if (used > available && used > 0) visibleText.forEach((c) => (colW[c.key] *= available / used));
   }
 
   const colRight = {
@@ -617,8 +695,8 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     qty: right - colW.num - colW.profile - colW.dims - colW.location - colW.details - colW.unitPrice,
     total: right - colW.num - colW.profile - colW.dims - colW.location - colW.details - colW.unitPrice - colW.qty,
   };
-  const lineH = 14;
-  const headerH = 40;
+  const lineH = Math.round(FS * 1.4);
+  const headerH = 36;
 
   const colBoundaries = [
     MARGIN_X,
@@ -675,14 +753,14 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       { text: "סה״כ", xCenter: colRight.total - colW.total / 2, show: true },
     ];
     headers.forEach(({ text, xCenter, show }) => {
-      if (show) drawTextCenter(currentPage, hebrewFont, latinFont, 12, text, xCenter, cy);
+      if (show) drawTextCenter(currentPage, hebrewFont, latinFont, HEADER_FS, text, xCenter, cy);
     });
     // מידות: title + order hint (width × height) matching the values below
     drawTextCenter(
       currentPage,
       hebrewFont,
       latinFont,
-      11,
+      Math.min(10, HEADER_FS),
       dimsHeader,
       dimsX,
       y - 14
@@ -695,30 +773,35 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
 
   drawTableHeader();
 
-  rows.forEach(({ dims, qty, lineTotal, unitPriceText, totalText, rateOnly, profileStr, locationStr, detailsStr }, idx: number) => {
+  rows.forEach(({ dims, qty, lineTotal, unitPriceText, totalText, rateOnly, profileStr, locationStr, detailsStr, company }, idx: number) => {
     const lineTotalWithVat = lineTotal * (1 + taxRate);
-    const profileLines = wrapText(hebrewFont, latinFont, 12, profileStr, colW.profile - 8);
-    const locationLines = wrapText(hebrewFont, latinFont, 12, locationStr, colW.location - 8);
-    const detailsLines = wrapText(hebrewFont, latinFont, 12, detailsStr, colW.details - 8);
-    const unitPriceLines = wrapText(hebrewFont, latinFont, 12, unitPriceText, colW.unitPrice - 8);
-    const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);
+    const companyLogo = company ? companyLogos.get(company.id) : undefined;
+    const cellW = (w: number) => w - CELL_PAD + 2;
+    const profileLines = [
+      ...wrapText(hebrewFont, latinFont, FS, profileStr, cellW(colW.profile)),
+      ...(company && !companyLogo ? [company.name] : []),
+    ];
+    const ROW_LOGO_H = 11;
+    const locationLines = wrapText(hebrewFont, latinFont, FS, locationStr, cellW(colW.location));
+    const detailsLines = wrapText(hebrewFont, latinFont, FS, detailsStr, cellW(colW.details));
+    const unitPriceLines = [unitPriceText];
+    const qtyLines = [formatNum(qty)];
     const baseTotalText = rateOnly ? totalText : `${formatNum(lineTotal)} ₪`;
     const vatTotalText = `עם מע״מ ${formatNum(lineTotalWithVat)} ₪`;
-    const baseTotalLines = wrapText(hebrewFont, latinFont, 12, baseTotalText, colW.total - 8);
+    const baseTotalLines = [baseTotalText];
     const vatTotalLines = !showTotalsBox
-      ? wrapText(hebrewFont, latinFont, 12, vatTotalText, colW.total - 8)
+      ? wrapText(hebrewFont, latinFont, FS, vatTotalText, cellW(colW.total))
       : [];
     const totalLinesWrapped: string[] = [...baseTotalLines, ...vatTotalLines];
     const rowLines = Math.max(
       1,
       profileLines.length,
       locationLines.length,
-      detailsLines.length,
-      unitPriceLines.length,
-      qtyLines.length,
+      detailsLines.filter(Boolean).length,
       totalLinesWrapped.length
     );
-    const rowH = rowLines * lineH + 6;
+    const profileH = profileLines.length * lineH + (companyLogo ? ROW_LOGO_H + 4 : 0);
+    const rowH = Math.max(rowLines * lineH, profileH) + 8;
     checkNewPage(rowH);
     currentPage.drawRectangle({
       x: MARGIN_X,
@@ -729,19 +812,9 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       borderWidth: 0.5,
     });
     drawVerticalGridLines(currentPage, y - rowH, y);
-    const rowBaseline = y - 2 - lineH;
-    const drawT = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) => {
-      const rtlText = reverseWordOrder(t);
-      const segments = segmentForFonts(rtlText);
-      let x = xR - 4;
-      for (let i = segments.length - 1; i >= 0; i--) {
-        const { text: seg, useHebrew } = segments[i];
-        const font = useHebrew ? hebrewFont : latinFont;
-        const w = font.widthOfTextAtSize(seg, 12);
-        x -= w;
-        currentPage.drawText(seg, { x, y: yy, size: 12, font, color });
-      }
-    };
+    const rowBaseline = y - 4 - FS;
+    const drawT = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) =>
+      drawCellText(currentPage, hebrewFont, latinFont, FS, t, xR - CELL_PAD / 2, yy, color);
     const drawColLines = (lines: string[], xR: number) => {
       let yy = rowBaseline;
       for (const line of lines) {
@@ -751,10 +824,20 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     };
     drawT(String(idx + 1), colRight.num, rowBaseline);
     drawColLines(profileLines, colRight.profile);
+    if (companyLogo) {
+      const w = Math.min(colW.profile - 8, (companyLogo.width / companyLogo.height) * ROW_LOGO_H);
+      const h = (companyLogo.height / companyLogo.width) * w;
+      currentPage.drawImage(companyLogo, {
+        x: colRight.profile - 4 - w,
+        y: rowBaseline - profileLines.length * lineH + lineH - 4 - h,
+        width: w,
+        height: h,
+      });
+    }
     // מידות stays on one line so the full WxH number is readable at a glance
     drawT(dims, colRight.dims, rowBaseline);
     drawColLines(locationLines, colRight.location);
-    drawColLines(detailsLines, colRight.details);
+    drawColLines(detailsLines.filter(Boolean), colRight.details);
     drawColLines(unitPriceLines, colRight.unitPrice);
     drawColLines(qtyLines, colRight.qty);
     // Total column: base total and, when overall box is hidden, extra wrapped line(s) "עם מע״מ ..." with background highlight
@@ -764,8 +847,8 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       if (isVatLine) {
         // Light background marker behind the "עם מע״מ" line only (single-line height, aligned to this line’s baseline)
         const rectX = colRight.total - colW.total;
-        const rectHeight = 12; // one line of 12pt text
-        const rectY = totalY;   // baseline of this line – rect sits behind this line only
+        const rectHeight = FS;
+        const rectY = totalY - 2;
         currentPage.drawRectangle({
           x: rectX,
           y: rectY,
@@ -787,13 +870,14 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
     const totalWithVat = total * (1 + taxRate);
     const baseTotalText = `${formatNum(total)} ₪`;
     const vatTotalText = `עם מע״מ ${formatNum(totalWithVat)} ₪`;
-    const profileLines = wrapText(hebrewFont, latinFont, 12, ADDITION_PROFILE_LABEL, colW.profile - 8);
-    const nameLines = wrapText(hebrewFont, latinFont, 12, add.name || "", colW.details - 8);
-    const unitPriceLines = wrapText(hebrewFont, latinFont, 12, formatNum(price), colW.unitPrice - 8);
-    const qtyLines = wrapText(hebrewFont, latinFont, 12, formatNum(qty), colW.qty - 8);
-    const baseTotalLines = wrapText(hebrewFont, latinFont, 12, baseTotalText, colW.total - 8);
+    const cellW = (w: number) => w - CELL_PAD + 2;
+    const profileLines = wrapText(hebrewFont, latinFont, FS, ADDITION_PROFILE_LABEL, cellW(colW.profile));
+    const nameLines = wrapText(hebrewFont, latinFont, FS, add.name || "", cellW(colW.details));
+    const unitPriceLines = [formatNum(price)];
+    const qtyLines = [formatNum(qty)];
+    const baseTotalLines = [baseTotalText];
     const vatTotalLines = !showTotalsBox
-      ? wrapText(hebrewFont, latinFont, 12, vatTotalText, colW.total - 8)
+      ? wrapText(hebrewFont, latinFont, FS, vatTotalText, cellW(colW.total))
       : [];
     const totalLinesWrapped: string[] = [...baseTotalLines, ...vatTotalLines];
     const rowLines = Math.max(
@@ -804,7 +888,7 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       qtyLines.length,
       totalLinesWrapped.length
     );
-    const rowH = rowLines * lineH + 6;
+    const rowH = rowLines * lineH + 8;
     checkNewPage(rowH);
     currentPage.drawRectangle({
       x: MARGIN_X,
@@ -815,19 +899,9 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       borderWidth: 0.5,
     });
     drawVerticalGridLines(currentPage, y - rowH, y);
-    const rowBaseline = y - 2 - lineH;
-    const drawAdd = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) => {
-      const rtlText = reverseWordOrder(t);
-      const segments = segmentForFonts(rtlText);
-      let x = xR - 4;
-      for (let i = segments.length - 1; i >= 0; i--) {
-        const { text: seg, useHebrew } = segments[i];
-        const font = useHebrew ? hebrewFont : latinFont;
-        const w = font.widthOfTextAtSize(seg, 12);
-        x -= w;
-        currentPage.drawText(seg, { x, y: yy, size: 12, font, color });
-      }
-    };
+    const rowBaseline = y - 4 - FS;
+    const drawAdd = (t: string, xR: number, yy: number, color = rgb(0, 0, 0)) =>
+      drawCellText(currentPage, hebrewFont, latinFont, FS, t, xR - CELL_PAD / 2, yy, color);
     const drawColLines = (lines: string[], xR: number) => {
       let yy = rowBaseline;
       for (const line of lines) {
@@ -846,8 +920,8 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       const isVatLine = lineIdx >= baseTotalLines.length;
       if (isVatLine) {
         const rectX = colRight.total - colW.total;
-        const rectHeight = 12;
-        const rectY = totalY;
+        const rectHeight = FS;
+        const rectY = totalY - 2;
         currentPage.drawRectangle({
           x: rectX,
           y: rectY,
@@ -1086,17 +1160,20 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       ? `הצעה מס׳ ${String(Math.floor(payload.quoteNumber)).padStart(4, "0")}`
       : docTitle;
 
-  await drawQuoteProducts({
-    doc,
-    fonts: {
-      hebrew: hebrewFont,
-      latin: latinFont,
-      latinBold,
-      hebrewChars: new Set(hebrewFont.getCharacterSet()),
-    },
-    items,
-    footerLabel: `${quoteLabel} · ${customerLabel}`,
-  });
+  if (payload.includeProductDetails !== false) {
+    await drawQuoteProducts({
+      doc,
+      fonts: {
+        hebrew: hebrewFont,
+        latin: latinFont,
+        latinBold,
+        hebrewChars: new Set(hebrewFont.getCharacterSet()),
+      },
+      items,
+      companyLogos,
+      footerLabel: `${quoteLabel} · ${customerLabel}`,
+    });
+  }
 
   // Page numbers + thin footer rule on every page (pricing pages and product appendix).
   const allPages = doc.getPages();

@@ -16,9 +16,17 @@ async function copyText(text: string) {
 }
 
 /** Shows the CSV layout before a file is chosen, and copies a ChatGPT prompt for that layout. */
-export default function WindowImportNote({ profileNames }: { profileNames: string[] }) {
+export default function WindowImportNote({
+  profileNames,
+  addonNames,
+  customerName = "",
+}: {
+  profileNames: string[];
+  addonNames: string[];
+  customerName?: string;
+}) {
   const [copied, setCopied] = useState(false);
-  const sample = windowImportSampleCsv(profileNames);
+  const sample = windowImportSampleCsv(profileNames, addonNames);
 
   return (
     <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm">
@@ -30,7 +38,7 @@ export default function WindowImportNote({ profileNames }: { profileNames: strin
           type="button"
           className="shrink-0 px-3 py-1.5 rounded-lg border border-sky-300 bg-white text-sky-800 hover:bg-sky-100"
           onClick={() => {
-            void copyText(windowImportChatPrompt(profileNames)).then(() => {
+            void copyText(windowImportChatPrompt(profileNames, addonNames, customerName)).then(() => {
               setCopied(true);
               window.setTimeout(() => setCopied(false), 2500);
             });
@@ -43,7 +51,7 @@ export default function WindowImportNote({ profileNames }: { profileNames: strin
         {sample}
       </pre>
       <p className="mt-2 text-xs text-slate-600">
-        ההעתקה כוללת את הפורמט ואת שמות הפרופילים מהמחירון. הדבק אותה בצ׳אט, ואחריה את הרשימה הגולמית.
+        ההעתקה מבקשת קובץ CSV להורדה על שם הלקוח, כולל הפרופילים והתוספות מהמחירון. עמודת הפרטים נשארת ריקה. הדבק אותה בצ׳אט, ואחריה את הרשימה הגולמית.
       </p>
     </div>
   );

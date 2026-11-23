@@ -49,7 +49,8 @@ export type ImportField =
   | "shadingColor"
   | "hardwareSet"
   | "alternatives"
-  | "profile";
+  | "profile"
+  | "addons";
 
 export const IMPORT_FIELDS: ImportField[] = [
   "reference",
@@ -87,6 +88,7 @@ export const IMPORT_FIELDS: ImportField[] = [
   "description",
   "notes",
   "profile",
+  "addons",
 ];
 
 export const REQUIRED_FIELDS: ImportField[] = ["category", "openingType", "width", "height", "quantity"];
@@ -127,6 +129,7 @@ export const FIELD_LABELS: Record<ImportField, { en: string; he: string }> = {
   hardwareSet: { en: "Complete hardware set", he: "סט פרזול מלא" },
   alternatives: { en: "Alternatives", he: "חלופות" },
   profile: { en: "Profile", he: "פרופיל" },
+  addons: { en: "Add-ons", he: "תוספות" },
 };
 
 /** Normalize text for matching: lowercase, unify Hebrew geresh/quotes, drop punctuation and spacing. */
@@ -176,6 +179,7 @@ const HEADER_ALIASES: Record<ImportField, string[]> = {
   hardwareSet: ["complete hardware set", "hardware set", "full hardware set", "סט פרזול מלא", "סט פרזול"],
   alternatives: ["alternatives", "alternative", "options", "חלופות", "חלופה"],
   profile: ["profile", "profile series", "series", "system", "פרופיל", "סדרה", "סדרת פרופיל", "מערכת"],
+  addons: ["addons", "add ons", "additions", "extras", "תוספות", "תוספת", "תוספות מחיר"],
 };
 
 /** Map file headers to fields. A bilingual header like "Width (mm) / רוחב" matches on either part. */
