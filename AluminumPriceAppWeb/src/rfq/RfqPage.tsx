@@ -368,6 +368,8 @@ export default function RfqPage({
                 </Btn>
               )}
               <Btn onClick={() => void exportRequestFile()}>{d.ui.exportRequestFile}</Btn>
+            </div>
+            <div className="flex flex-wrap items-end gap-2">
               <Btn variant="primary" onClick={() => setImportingQuote(true)}>
                 {d.ui.importQuotation}
               </Btn>

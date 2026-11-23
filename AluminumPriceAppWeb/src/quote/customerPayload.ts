@@ -1,6 +1,7 @@
-import type { AppCurrentState, FreeFormAddition, LineItem } from "../types";
-import type { PdfFreeFormAddition, PdfLineItem, PdfQuotePayload } from "../pdfExporter";
+import type { AppCurrentState, FreeFormAddition, LineItem, Manufacturer, Profile } from "../types";
+import type { PdfFreeFormAddition, PdfLineItem, PdfManufacturer, PdfQuotePayload } from "../pdfExporter";
 import type { RfqItem } from "../rfq/types";
+import { lineManufacturer } from "./manufacturers";
 
 /** Fields a customer document is allowed to contain. Supplier cost, markup and exchange rate are not among them. */
 const LINE_KEYS = [
@@ -54,10 +55,23 @@ export function toCustomerAddition(add: FreeFormAddition): PdfFreeFormAddition {
   return { id: add.id, name: add.name, price: add.price, qty: add.qty };
 }
 
+function toPdfManufacturer(m: Manufacturer | undefined): PdfManufacturer | undefined {
+  return m ? { id: m.id, name: m.name, logoUrl: m.logoUrl } : undefined;
+}
+
 export function toCustomerPdfPayload(
   current: AppCurrentState,
-  extra: { pdfSaveFolder?: string; dimensionUnit?: "cm" | "mm"; pdfDateMs?: number; quoteUnchanged?: boolean }
+  extra: {
+    pdfSaveFolder?: string;
+    dimensionUnit?: "cm" | "mm";
+    pdfDateMs?: number;
+    quoteUnchanged?: boolean;
+    profiles?: Profile[];
+    manufacturers?: Manufacturer[];
+  }
 ): PdfQuotePayload {
+  const profiles = extra.profiles ?? [];
+  const manufacturers = extra.manufacturers ?? [];
   return {
     title: current.title,
     documentType: current.documentType,
@@ -72,11 +86,15 @@ export function toCustomerPdfPayload(
     validityText: current.validityText,
     paymentTerms: current.paymentTerms,
     installationTerms: current.installationTerms,
-    items: current.items.map(toCustomerPdfItem),
+    items: current.items.map((item) => ({
+      ...toCustomerPdfItem(item),
+      manufacturer: toPdfManufacturer(lineManufacturer(item, profiles, manufacturers)),
+    })),
     freeFormAdditions: current.freeFormAdditions.map(toCustomerAddition),
     pdfSaveFolder: extra.pdfSaveFolder,
     dimensionUnit: extra.dimensionUnit,
     showTotals: current.showTotals,
+    includeProductDetails: current.includeProductDetails,
     pdfDateMs: extra.pdfDateMs,
     quoteUnchanged: extra.quoteUnchanged,
   };

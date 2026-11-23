@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { buildDiagram } from "../rfq/diagram";
 import { DiagramSvg } from "../rfq/RfqDiagram";
-import RfqImportDialog from "../rfq/RfqImportDialog";
 import RfqItemEditor from "../rfq/RfqItemEditor";
 import { dict } from "../rfq/i18n";
 import { createRfqItem, OPENING_TYPE_DEFS } from "../rfq/presets";
@@ -41,14 +40,12 @@ export default function WindowPicker({
     );
     return [...fromQuote, ...fromRequests];
   }, [quoteItems, requests]);
-  const [imported, setImported] = useState<Source[]>([]);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [focused, setFocused] = useState(saved[0]?.key ?? "");
   const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
   const [includeAllProfiles, setIncludeAllProfiles] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState<RfqItem | null>(null);
-  const sources = [...imported, ...saved];
+  const sources = saved;
   const current = sources.find((source) => source.key === focused)?.item ?? sources[0]?.item;
   const preview = current
     ? buildDiagram(current, { width: 320, height: 240, customPlaceholder: "שרטוט מצורף", showDivisionDims: current.openingType !== "custom" })
@@ -113,9 +110,6 @@ export default function WindowPicker({
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
           <h2 className="text-xl font-semibold">בחירת חלונות ודלתות</h2>
           <div className="flex gap-2">
-            <button type="button" className="px-3 py-1.5 rounded border" onClick={() => setImporting(true)}>
-              ייבוא חלונות מ-Excel / CSV
-            </button>
             <button type="button" className="px-3 py-1.5 rounded border" onClick={onClose}>סגירה</button>
           </div>
         </div>
@@ -133,7 +127,7 @@ export default function WindowPicker({
               </button>
             </div>
             <div className="grid gap-2 max-h-[50vh] overflow-auto">
-              {sources.length === 0 && <p className="text-sm text-slate-500">אין עדיין חלונות שמורים. אפשר לייבא קובץ או להגדיר חלון חדש.</p>}
+              {sources.length === 0 && <p className="text-sm text-slate-500">אין עדיין חלונות שמורים. אפשר לייבא קובץ ליד פריטי ההצעה, או להגדיר חלון חדש.</p>}
               {sources.map((source) => (
                 <label
                   key={source.key}
@@ -193,10 +187,7 @@ export default function WindowPicker({
                         id: rfqUuid(),
                         openingType: opening,
                         unit: "cm",
-                        reference: nextRef(opening, [
-                          ...quoteItems.flatMap((line) => (line.configuration ? [line.configuration.reference] : [])),
-                          ...imported.map((source) => source.item.reference),
-                        ]),
+                        reference: nextRef(opening, quoteItems.flatMap((line) => (line.configuration ? [line.configuration.reference] : []))),
                         withDefaultSize: true,
                       })
                     )
@@ -211,29 +202,6 @@ export default function WindowPicker({
           </div>
         </div>
       </div>
-      {importing && (
-        <RfqImportDialog
-          lang="he"
-          existingItems={imported.map((source) => source.item)}
-          confirm={async (message) => window.confirm(message)}
-          onCancel={() => setImporting(false)}
-          onCommit={(items, mode) => {
-            const added = items.map((item, index) => ({
-              key: `import-${item.id}-${index}`,
-              label: `מיובא · ${item.reference || item.customDescription || "חלון"}`,
-              item,
-            }));
-            setImported((prev) => (mode === "replace" ? added : [...added, ...prev]));
-            setChecked((prev) => {
-              const kept = mode === "replace" ? new Set([...prev].filter((key) => !key.startsWith("import-"))) : new Set(prev);
-              for (const source of added) kept.add(source.key);
-              return kept;
-            });
-            setFocused(added[0]?.key ?? focused);
-            setImporting(false);
-          }}
-        />
-      )}
     </div>
   );
 }

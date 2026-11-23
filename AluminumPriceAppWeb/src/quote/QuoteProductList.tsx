@@ -1,30 +1,19 @@
-import { useState } from "react";
 import { buildDiagram } from "../rfq/diagram";
 import { DiagramSvg } from "../rfq/RfqDiagram";
 import { describeConfigurationShort, describeGlass, dict } from "../rfq/i18n";
-import type { LineItem } from "../types";
+import type { LineItem, Manufacturer, Profile } from "../types";
 import { dimensionText } from "./customerSpecs";
 import { lineQuantity, lineTotal, lineUnitPrice, priceBasisOf } from "./pricing";
-import { EKLIEN_LOGO_CANDIDATES, mentionsEklien } from "./eklienLogo";
-
-function ManufacturerLogo() {
-  const [index, setIndex] = useState(0);
-  if (index >= EKLIEN_LOGO_CANDIDATES.length) return null;
-  return (
-    <img
-      src={EKLIEN_LOGO_CANDIDATES[index]}
-      alt="EKLIEN"
-      className="h-5 w-auto object-contain"
-      onError={() => setIndex((i) => i + 1)}
-    />
-  );
-}
+import { lineManufacturer } from "./manufacturers";
+import ManufacturerBadge from "./ManufacturerBadge";
 
 const money = new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS" });
 
 /** One card per drawn window or door, laid out like the supplier request items. */
 export default function QuoteProductList({
   items,
+  profiles,
+  manufacturers,
   onEditDrawing,
   onDuplicate,
   onRemove,
@@ -32,6 +21,8 @@ export default function QuoteProductList({
   onMoveDown,
 }: {
   items: LineItem[];
+  profiles: Profile[];
+  manufacturers: Manufacturer[];
   onEditDrawing: (id: string) => void;
   onDuplicate: (id: string) => void;
   onRemove: (id: string) => void;
@@ -57,7 +48,7 @@ export default function QuoteProductList({
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <bdi className="font-bold">{position}. {cfg.reference || item.profileName || "פריט"}</bdi>
-                  {mentionsEklien(item) && <ManufacturerLogo />}
+                  <ManufacturerBadge manufacturer={lineManufacturer(item, profiles, manufacturers)} />
                 </div>
                 <div className="text-sm">{item.customerDescription || d.openingType[cfg.openingType]}</div>
                 {item.location && <div className="text-xs text-slate-600"><bdi>{item.location}</bdi></div>}
@@ -80,6 +71,9 @@ export default function QuoteProductList({
               {cfg.openingType !== "custom" && <div className="text-slate-600">{describeConfigurationShort("he", cfg)}</div>}
               {glass && <div className="text-slate-600">{d.ui.glass}: {glass}</div>}
               {(item.profileName || cfg.frameFinish) && <div className="text-slate-600">פרופיל: {item.profileName || cfg.frameFinish}</div>}
+              {item.addons.filter((addon) => addon.checked).map((addon) => (
+                <div key={addon.id} className="text-slate-600">תוספת: {addon.name} · {money.format(Number(addon.price) || 0)} ליח׳</div>
+              ))}
               {item.details && <div className="text-slate-600 whitespace-pre-wrap">{item.details}</div>}
             </div>
             <div className="text-sm font-medium text-sky-800">

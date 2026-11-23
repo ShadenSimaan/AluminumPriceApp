@@ -83,9 +83,9 @@ describe("customer PDF product cards", () => {
       if (url.includes("NotoSansHebrew") || url.includes("/fonts/")) {
         return new Response(font, { status: 200, headers: { "Content-Type": "font/ttf" } });
       }
-      if (url.includes("alum-simaan") || url.includes("/brand/")) {
+      if (url.includes("/brand/")) {
         try {
-          const bytes = readFileSync("public/brand/alum-simaan-sami-logo.png");
+          const bytes = readFileSync(`public/brand/${url.split("/brand/")[1].split(/[?#]/)[0]}`);
           return new Response(bytes, { status: 200, headers: { "Content-Type": "image/png" } });
         } catch {
           return new Response(null, { status: 404 });
@@ -117,6 +117,21 @@ describe("customer PDF product cards", () => {
       // Pricing page + product appendix: 6 compact cards should not need 6+ product pages.
       expect(doc.getPageCount()).toBeLessThanOrEqual(5);
       expect(doc.getPageCount()).toBeGreaterThanOrEqual(2);
+
+      const withoutDrawings = await buildQuotePdfBytes({ ...payload, includeProductDetails: false });
+      const shortDoc = await PDFDocument.load(withoutDrawings);
+      expect(shortDoc.getPageCount()).toBe(1);
+      expect(withoutDrawings.byteLength).toBeLessThan(bytes.byteLength);
+
+      // Company logos: Alumil on some lines, קליל on others, none on the rest.
+      const alumil = { id: "mfr-alumil", name: "Alumil", logoUrl: "/brand/alumil-logo.png" };
+      const klil = { id: "mfr-klil", name: "קליל", logoUrl: "/brand/klil-logo.png" };
+      const branded = items.map((it, i) => ({ ...it, manufacturer: i < 2 ? alumil : i < 4 ? klil : undefined }));
+      const plain = await buildQuotePdfBytes({ ...payload, items: items.map((it) => ({ ...it, manufacturer: undefined })) });
+      const withLogos = await buildQuotePdfBytes({ ...payload, items: branded });
+      const imageCount = (b: Uint8Array) => (Buffer.from(b).toString("latin1").match(/\/Subtype\s*\/Image/g) ?? []).length;
+      // Each transparent PNG logo is embedded once (image + alpha mask), however many rows use it.
+      expect(imageCount(withLogos)).toBe(imageCount(plain) + 4);
     } finally {
       globalThis.fetch = originalFetch;
     }

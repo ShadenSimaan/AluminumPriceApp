@@ -92,9 +92,32 @@ h3 { font-size: 1.5rem; font-weight: 700; }    /* ~29px */
   overflow: auto;
 }
 
-/* Tables inside cards: horizontal scroll on small phones */
+/* Tables inside cards: scroll inside the card, never widen the page */
 .table-scroll {
   overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Customers list: content-sized columns stay readable; name/email take leftover space */
+.table-customers {
+  width: 100%;
+}
+.table-customers .col-flex {
+  width: 22%;
+  max-width: 0;
+  overflow-wrap: anywhere;
+}
+.table-customers .col-ellipsis {
+  width: 18%;
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.table-customers .col-fit {
+  width: 1%;
+  white-space: nowrap;
 }
 
 .table-inner-min {

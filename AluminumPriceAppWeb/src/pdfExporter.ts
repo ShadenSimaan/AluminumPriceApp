@@ -273,6 +273,14 @@ export interface PdfLineItem {
   subtotal?: number;
   addons: PdfAddon[];
   profileName?: string; // make sure this exists on your items
+  /** Company of the line's profile; its logo is shown in the PDF. */
+  manufacturer?: PdfManufacturer;
+}
+
+export interface PdfManufacturer {
+  id: string;
+  name: string;
+  logoUrl?: string;
 }
 
 export interface PdfFreeFormAddition {
@@ -298,6 +306,8 @@ export interface PdfQuotePayload {
   dimensionUnit?: "cm" | "mm"; // display dimensions in cm or mm (data is stored in cm)
   /** When false, do not draw the overall totals box (מחיר/מע״מ/סה״כ) */
   showTotals?: boolean;
+  /** When false, skip the per-window drawings and specs after the items table. */
+  includeProductDetails?: boolean;
   /** True when the quote has not changed since it was last saved (shown in the "file exists" prompt). */
   quoteUnchanged?: boolean;
 }
@@ -499,7 +509,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
     payload.documentNumber
   );
 
-  // If this document's PDF already exists, let the user choose: save it again (replace) or open the existing file.
+  // Always write the PDF that הדפסה opens. Reusing an older file showed a different document.
   let replaceExisting = false;
   if (isTauri()) {
     try {
@@ -516,28 +526,7 @@ export async function exportQuotePdf(payload: PdfQuotePayload): Promise<PdfExpor
         const yearFolder = await pathModule.join(base, String(yyyy));
         savePath = await pathModule.join(yearFolder, filename);
       }
-      if (savePath && (await fsModule.exists(savePath))) {
-        const dialogModule = await import("@tauri-apps/plugin-dialog");
-        const unchangedNote = payload.quoteUnchanged ? "לא בוצעו שינויים מאז השמירה האחרונה.\n\n" : "";
-        const resave = await dialogModule.ask(
-          `קובץ PDF למסמך זה כבר שמור:\n${filename}\n\n${unchangedNote}לשמור אותו מחדש? הקובץ הקיים יוחלף בגרסה הנוכחית.`,
-          {
-            title: "הקובץ כבר קיים",
-            kind: "info",
-            okLabel: "שמור מחדש (החלף)",
-            cancelLabel: "פתח את הקובץ הקיים",
-          }
-        );
-        if (!resave) {
-          try {
-            await revealPdfFile(savePath);
-          } catch (revealErr: any) {
-            console.warn("Could not reveal existing PDF:", revealErr?.message || revealErr);
-          }
-          return { success: true, savedPath: savePath, reusedExisting: true };
-        }
-        replaceExisting = true;
-      }
+      if (savePath && (await fsModule.exists(savePath))) replaceExisting = true;
     } catch (existingCheckErr: any) {
       console.warn("Existing PDF check failed, continuing with normal export:", existingCheckErr?.message || existingCheckErr);
     }
@@ -789,16 +778,18 @@ Scope הוענק: ${scopeGranted ? "כן" : "לא"}
         throw writeError;
       }
       
-      // Reveal the exported PDF in the file manager (select the file on Windows)
+      // Open the file that was just written — the same PDF הדפסה shows — and select it in the folder.
+      try {
+        await openerModule.openPath(finalSavePath);
+      } catch (openErr: any) {
+        console.warn("Could not open exported PDF:", openErr?.message || openErr);
+      }
       try {
         await revealPdfFile(finalSavePath);
         console.log("✓ Revealed PDF in file manager");
       } catch (revealErr: any) {
         console.warn("⚠ Could not reveal PDF in file manager:", revealErr?.message || revealErr);
       }
-      
-      // Note: we intentionally do NOT auto-open the PDF viewer here.
-      // Revealing the file in Explorer (selected) is the fastest way to find it.
       
       console.log("=== PDF EXPORT COMPLETE ===");
       return { success: true, savedPath: finalSavePath };

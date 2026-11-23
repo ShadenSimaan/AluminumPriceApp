@@ -1,5 +1,4 @@
 import { PDFDocument, rgb, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
-import { eklienLogoKind, loadEklienLogoBytes, mentionsEklien } from "./eklienLogo";
 import type { PdfLineItem } from "../pdfExporter";
 import { buildDiagram } from "../rfq/diagram";
 import { dict } from "../rfq/i18n";
@@ -37,6 +36,8 @@ export async function drawQuoteProducts(args: {
   doc: PDFDocument;
   fonts: PdfFonts;
   items: PdfLineItem[];
+  /** Embedded company logos by manufacturer id. */
+  companyLogos?: Map<string, PDFImage>;
   /** Optional footer label (quote number / customer) shown on product pages. */
   footerLabel?: string;
 }): Promise<void> {
@@ -45,12 +46,7 @@ export async function drawQuoteProducts(args: {
   if (!items.length) return;
   const d = dict("he");
   const cache: ImageCache = new Map();
-  let eklien: PDFImage | null = null;
-  if (items.some(mentionsEklien)) {
-    const bytes = await loadEklienLogoBytes();
-    const kind = bytes ? eklienLogoKind(bytes) : null;
-    if (bytes && kind) eklien = kind === "png" ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-  }
+  const companyLogos = args.companyLogos ?? new Map<string, PDFImage>();
 
   const productPages: PDFPage[] = [];
   let page: PDFPage = doc.addPage([PAGE_W, PAGE_H]);
@@ -158,10 +154,15 @@ export async function drawQuoteProducts(args: {
     const title = `${index + 1}. ${cfg.reference || item.profileName || "פריט"} — ${
       item.customerDescription || d.openingType[cfg.openingType]
     }`;
-    const brandW = eklien && mentionsEklien(item) ? (eklien.width / eklien.height) * 11 : 0;
+    const brand = item.manufacturer ? companyLogos.get(item.manufacturer.id) : undefined;
+    const brandW = brand ? Math.min(90, (brand.width / brand.height) * 11) : 0;
+    const brandH = brand ? (brand.height / brand.width) * brandW : 0;
+    const brandName = !brand && item.manufacturer ? item.manufacturer.name : "";
+    const brandNameW = brandName ? 70 : 0;
     textAt(`${d.ui.quantity}: ${qty}`, 6, CONTENT_W - 12, cardTop - 11.5, { size: 8.5, bold: true, align: "end" });
-    if (brandW) page.drawImage(eklien!, { x: M + 56, y: cardTop - 13.5, width: brandW, height: 11 });
-    textAt(title, 6, CONTENT_W - 70 - brandW, cardTop - 11.5, { size: 8.5, bold: true });
+    if (brand) page.drawImage(brand, { x: M + 56, y: cardTop - BAR_H / 2 - brandH / 2, width: brandW, height: brandH });
+    if (brandName) textAt(brandName, CONTENT_W - 56 - brandNameW, brandNameW, cardTop - 11.5, { size: 8.5, bold: true, color: ACCENT, align: "end" });
+    textAt(title, 6, CONTENT_W - 70 - Math.max(brandW, brandNameW), cardTop - 11.5, { size: 8.5, bold: true });
 
     const bodyTop = cardTop - BAR_H - 4;
 

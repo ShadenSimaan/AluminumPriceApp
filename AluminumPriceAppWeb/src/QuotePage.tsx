@@ -11,14 +11,23 @@ import {
 } from "./types";
 import { isOpenAreaRate, lineTotal, lineUnitPrice, quoteMoney } from "./quote/pricing";
 import {
+  applyProfileToLineItem,
   cloneConfiguration,
   collectQuoteProfileSources,
   withSubtotal,
 } from "./quote/windowLine";
 import QuoteProductList from "./quote/QuoteProductList";
+import ManufacturerBadge from "./quote/ManufacturerBadge";
+import { CompanySelect, ProfileOptions } from "./quote/ProfileOptions";
+import { lineManufacturer, quoteManufacturers } from "./quote/manufacturers";
 import DocumentHeader from "./brand/DocumentHeader";
+import WindowImportNote from "./quote/WindowImportNote";
+import WindowImportPreview from "./quote/WindowImportPreview";
+import type { WindowImportResult } from "./quote/windowImport";
 import WindowPicker from "./quote/WindowPicker";
+import { importWindowsFromFile, quoteLineFromWindow } from "./quote/windowImport";
 import RfqItemEditor from "./rfq/RfqItemEditor";
+import RfqImportDialog from "./rfq/RfqImportDialog";
 import {
   Select,
   SelectContent,
@@ -103,8 +112,8 @@ type QuotePageProps = {
   /** Open the folder where PDFs are saved (Tauri only) */
   onOpenPdfFolder?: () => void;
   dimensionUnit?: "cm" | "mm";
-  onAddProfileQuick?: (name: string, unitPrice: number) => string;
-  onUpdateProfileQuick?: (id: string, name: string, unitPrice: number) => void;
+  onAddProfileQuick?: (name: string, unitPrice: number, manufacturerId?: string) => string;
+  onUpdateProfileQuick?: (id: string, name: string, unitPrice: number, manufacturerId?: string) => void;
   onAddConfiguredLines?: (items: LineItem[]) => void;
   onDuplicateItem?: (id: string) => void;
   /** Map source profile keys → target catalog profile ids for the whole quotation. */
@@ -294,7 +303,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const [remapModalContentEl, setRemapModalContentEl] = React.useState<HTMLElement | null>(null);
   /** When set, the profile popup is editing this existing profile; when null, it is add-new mode. */
   const [profileModalEditId, setProfileModalEditId] = React.useState<string | null>(null);
-  const [addProfileDraft, setAddProfileDraft] = React.useState({ name: "", unitPrice: "" });
+  const [addProfileDraft, setAddProfileDraft] = React.useState<{ name: string; unitPrice: string; manufacturerId?: string }>({
+    name: "",
+    unitPrice: "",
+  });
   const [editDraft, setEditDraft] = React.useState<LineItem | null>(null);
   const [editActiveProfileId, setEditActiveProfileId] = React.useState<string | undefined>(undefined);
   const [showAddItemModal, setShowAddItemModal] = React.useState(false);
@@ -323,6 +335,10 @@ const QuotePage: React.FC<QuotePageProps> = ({
   const [dragPreviewPos, setDragPreviewPos] = React.useState<{ x: number; y: number } | null>(null);
   const [windowPickerOpen, setWindowPickerOpen] = React.useState(false);
   const [drawingEditId, setDrawingEditId] = React.useState<string | null>(null);
+  const windowFileRef = React.useRef<HTMLInputElement>(null);
+  const [windowImportNote, setWindowImportNote] = React.useState<{ text: string; tone: "ok" | "warn" | "error" } | null>(null);
+  const [windowImportReview, setWindowImportReview] = React.useState<{ file: File; unit: "cm" | "mm" } | null>(null);
+  const [windowImportPreview, setWindowImportPreview] = React.useState<{ result: WindowImportResult; mode: "append" | "replace" } | null>(null);
   const itemsRef = React.useRef(state.current.items);
   const freeFormRef = React.useRef(state.current.freeFormAdditions);
   itemsRef.current = state.current.items;
@@ -333,6 +349,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
     setProfileModalEditId(null);
     setAddProfileDraft({ name: "", unitPrice: "" });
   }
+
+  const usedManufacturers = useMemo(
+    () => quoteManufacturers(state.current.items, state.profiles, state.manufacturers),
+    [state.current.items, state.profiles, state.manufacturers]
+  );
 
   const quoteProfileSources = useMemo(
     () => collectQuoteProfileSources(state.current.items),
@@ -372,10 +393,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
   function commitProfileModal() {
     const name = addProfileDraft.name.trim() || "פרופיל חדש";
     const unitPrice = parseLooseNumber(addProfileDraft.unitPrice) || 0;
+    const manufacturerId = addProfileDraft.manufacturerId;
     if (profileModalEditId && onUpdateProfileQuick) {
-      onUpdateProfileQuick(profileModalEditId, name, unitPrice);
+      onUpdateProfileQuick(profileModalEditId, name, unitPrice, manufacturerId);
     } else if (onAddProfileQuick) {
-      const newId = onAddProfileQuick(name, unitPrice);
+      const newId = onAddProfileQuick(name, unitPrice, manufacturerId);
       if (editingItemId) {
         setEditActiveProfileId(newId);
         setEditDraft((d) =>
@@ -385,6 +407,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 profileId: newId,
                 profileName: name.trim() || "פרופיל חדש",
                 unitPrice: String(unitPrice),
+                priceBasis: "per_m2",
               }
             : d
         );
@@ -474,6 +497,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
           profileId: p.id,
           profileName: p.name,
           unitPrice: String(p.unitPrice),
+          priceBasis: "per_m2",
         }));
       }
     } else if (editDraft && !editActiveProfileId) {
@@ -588,7 +612,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
         qty,
         profile: it.profileName || "",
         location: it.location || "",
-        details: [it.details, addonsText].filter(Boolean).join(" — "),
+        details: it.configuration ? addonsText : [it.details, addonsText].filter(Boolean).join(" — "),
       };
     });
     state.current.freeFormAdditions.forEach((add) => {
@@ -790,11 +814,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       </SelectTrigger>
                       <SelectContent portalContainer={remapModalContentEl}>
                         <SelectItem value="__keep__">— בחירה מהירה —</SelectItem>
-                        {state.profiles.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            {p.name} ({fmtCurrency.format(p.unitPrice)} / מ״ר)
-                          </SelectItem>
-                        ))}
+                        <ProfileOptions
+                          profiles={state.profiles}
+                          manufacturers={state.manufacturers}
+                          label={(p) => `${p.name} (${fmtCurrency.format(p.unitPrice)} / מ״ר)`}
+                        />
                       </SelectContent>
                     </Select>
                   </label>
@@ -832,11 +856,11 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             </SelectTrigger>
                             <SelectContent portalContainer={remapModalContentEl}>
                               <SelectItem value="__keep__">— ללא שינוי —</SelectItem>
-                              {state.profiles.map((p) => (
-                                <SelectItem key={p.id} value={p.id}>
-                                  {p.name} ({fmtCurrency.format(p.unitPrice)} / מ״ר)
-                                </SelectItem>
-                              ))}
+                              <ProfileOptions
+                                profiles={state.profiles}
+                                manufacturers={state.manufacturers}
+                                label={(p) => `${p.name} (${fmtCurrency.format(p.unitPrice)} / מ״ר)`}
+                              />
                             </SelectContent>
                           </Select>
                         </label>
@@ -919,6 +943,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 onChange={(v) => setAddProfileDraft((d) => ({ ...d, unitPrice: v }))}
                 inputMode="numeric"
               />
+              <label className="grid gap-1.5">
+                <span className="text-sm text-slate-700">חברה (מערכת אלומיניום)</span>
+                <CompanySelect
+                  value={addProfileDraft.manufacturerId}
+                  manufacturers={state.manufacturers}
+                  onChange={(id) => setAddProfileDraft((d) => ({ ...d, manufacturerId: id }))}
+                />
+              </label>
             </div>
             <div className="flex gap-2 mt-4 justify-end">
               <button
@@ -1007,6 +1039,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       onChange={(v) => setAddProfileDraft((d) => ({ ...d, unitPrice: v }))}
                       inputMode="numeric"
                     />
+                    <label className="grid gap-1.5">
+                      <span className="text-sm text-slate-700">חברה (מערכת אלומיניום)</span>
+                      <CompanySelect
+                        value={addProfileDraft.manufacturerId}
+                        manufacturers={state.manufacturers}
+                        onChange={(id) => setAddProfileDraft((d) => ({ ...d, manufacturerId: id }))}
+                      />
+                    </label>
                   </div>
                   <div className="flex gap-2 pt-2">
                     <button
@@ -1086,7 +1126,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         const p = state.profiles.find((x) => x.id === pid);
                         if (!p) return;
                         setProfileModalEditId(pid);
-                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice) });
+                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice), manufacturerId: p.manufacturerId });
                         setShowAddProfileModal(true);
                       } else if (id === "__empty__") {
                         setActiveProfileId(undefined);
@@ -1100,11 +1140,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     </SelectTrigger>
                     <SelectContent portalContainer={addItemModalContentEl}>
                       <SelectItem value="__empty__">— בחר/י —</SelectItem>
-                      {state.profiles.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.name}
-                        </SelectItem>
-                      ))}
+                      <ProfileOptions profiles={state.profiles} manufacturers={state.manufacturers} />
                       {activeProfileId && onUpdateProfileQuick && (
                         <SelectItem value="__edit_profile__">✏️ ערוך פרופיל...</SelectItem>
                       )}
@@ -1142,7 +1178,21 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 <div className="text-sm font-medium mb-2">תוספות (מחיר ליח׳)</div>
                 <div className="flex flex-wrap gap-2">
                   {state.addons.map((a) => {
-                    const itemAddon = itemEditor.addons.find((ia) => ia.id === a.id) || { ...a, checked: false };
+                    const itemAddon =
+                      itemEditor.addons.find((ia) => ia.id === a.id) ||
+                      itemEditor.addons.find((ia) => ia.name === a.name) ||
+                      { ...a, checked: false };
+                    const writeAddon = (patch: Partial<typeof a>) => {
+                      const current =
+                        itemEditor.addons.find((ia) => ia.id === a.id) ||
+                        itemEditor.addons.find((ia) => ia.name === a.name);
+                      const nextAddon = { ...(current ?? a), ...patch, id: a.id, name: a.name };
+                      const next = [
+                        ...itemEditor.addons.filter((ia) => ia.id !== a.id && ia.name !== a.name),
+                        nextAddon,
+                      ];
+                      setItemEditor({ ...itemEditor, addons: next });
+                    };
                     return (
                       <div key={a.id} className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1">
                         <label className="flex items-center gap-2 cursor-pointer">
@@ -1150,13 +1200,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             type="checkbox"
                             className="w-5 h-5 cursor-pointer"
                             checked={itemAddon.checked}
-                            onChange={(e) => {
-                              const next = [...itemEditor.addons];
-                              const idx = next.findIndex((ia) => ia.id === a.id);
-                              if (idx >= 0) next[idx] = { ...next[idx], checked: e.target.checked };
-                              else next.push({ ...a, checked: e.target.checked });
-                              setItemEditor({ ...itemEditor, addons: next });
-                            }}
+                            onChange={(e) => writeAddon({ checked: e.target.checked, price: itemAddon.price })}
                           />
                           <span className="text-sm">{a.name}</span>
                         </label>
@@ -1166,13 +1210,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                           inputMode="numeric"
                           placeholder="₪"
                           value={itemAddon.price}
-                          onChange={(e) => {
-                            const next = [...itemEditor.addons];
-                            const idx = next.findIndex((ia) => ia.id === a.id);
-                            if (idx >= 0) next[idx] = { ...next[idx], price: e.target.value };
-                            else next.push({ ...a, price: e.target.value, checked: false });
-                            setItemEditor({ ...itemEditor, addons: next });
-                          }}
+                          onChange={(e) => writeAddon({ price: e.target.value, checked: itemAddon.checked })}
                         />
                       </div>
                     );
@@ -1291,6 +1329,54 @@ const QuotePage: React.FC<QuotePageProps> = ({
         </div>
       )}
 
+      {windowImportPreview && (
+        <WindowImportPreview
+          drafts={windowImportPreview.result.drafts}
+          message={windowImportPreview.result.message}
+          profiles={state.profiles}
+          addons={state.addons}
+          onCancel={() => setWindowImportPreview(null)}
+          onConfirm={(lines) => {
+            if (windowImportPreview.mode === "replace") updateCurrent("items", lines);
+            else if (onAddConfiguredLines) onAddConfiguredLines(lines);
+            else updateCurrent("items", [...state.current.items, ...lines]);
+            setWindowImportNote({
+              text: lines.length === 1 ? "חלון אחד נוסף להצעה." : `${lines.length} חלונות נוספו להצעה.`,
+              tone: "ok",
+            });
+            setWindowImportPreview(null);
+          }}
+        />
+      )}
+      {windowImportReview && (
+        <RfqImportDialog
+          lang="he"
+          forQuote
+          defaultUnit={windowImportReview.unit}
+          initialFile={windowImportReview.file}
+          existingItems={state.current.items.flatMap((item) => (item.configuration ? [item.configuration] : []))}
+          confirm={async (message) => window.confirm(message)}
+          onCancel={() => setWindowImportReview(null)}
+          onCommit={(items, mode) => {
+            const drafts = items.map((item) => {
+              const built = quoteLineFromWindow(item, state.addons, state.profiles);
+              return { line: built.line, unmatchedAddons: built.unmatchedAddons };
+            });
+            setWindowImportReview(null);
+            setWindowImportPreview({
+              mode,
+              result: {
+                lines: drafts.map((draft) => draft.line),
+                drafts,
+                skipped: [],
+                unit: windowImportReview.unit,
+                needsReview: false,
+                message: drafts.length === 1 ? "חלון אחד מוכן לתצוגה המקדימה." : `${drafts.length} חלונות מוכנים לתצוגה המקדימה.`,
+              },
+            });
+          }}
+        />
+      )}
       {windowPickerOpen && (
         <WindowPicker
           quoteItems={state.current.items}
@@ -1341,9 +1427,49 @@ const QuotePage: React.FC<QuotePageProps> = ({
       {/* Items Table + totals + save/export */}
       <section className="card p-4 w-full">
         <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-          <h2 className="text-xl font-semibold">
-            {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
-          </h2>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-xl font-semibold">
+              {state.current.documentType === "payment_request" ? "פריטי החשבון" : "פריטי ההצעה"}
+            </h2>
+            <input
+              ref={windowFileRef}
+              type="file"
+              accept=".csv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                void (async () => {
+                  const result = importWindowsFromFile({
+                    fileName: file.name,
+                    bytes: new Uint8Array(await file.arrayBuffer()),
+                    profiles: state.profiles,
+                    addons: state.addons,
+                    existingReferences: state.current.items.flatMap((item) => (item.configuration?.reference ? [item.configuration.reference] : [])),
+                    dimensionUnit,
+                  });
+                  if (result.lines.length) {
+                    setWindowImportPreview({ result, mode: "append" });
+                    setWindowImportReview(null);
+                  } else if (result.needsReview) {
+                    setWindowImportReview({ file, unit: result.unit ?? dimensionUnit });
+                  } else {
+                    setWindowImportReview(null);
+                  }
+                  const tone = result.lines.length === 0 ? "error" : result.skipped.length || result.message.includes("בלי פרופיל") ? "warn" : "ok";
+                  setWindowImportNote({ text: result.message, tone });
+                })();
+              }}
+            />
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-lg border border-sky-300 bg-sky-50 text-sky-800 text-sm hover:bg-sky-100"
+              onClick={() => windowFileRef.current?.click()}
+            >
+              ייבוא חלונות מ-Excel / CSV
+            </button>
+          </div>
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-sm text-slate-600 hidden sm:inline">
               הטבלה נגללת אופקית במסכים קטנים
@@ -1363,6 +1489,29 @@ const QuotePage: React.FC<QuotePageProps> = ({
             </button>
           </div>
         </div>
+        <WindowImportNote
+          profileNames={state.profiles.map((profile) => profile.name)}
+          addonNames={state.addons.map((addon) => addon.name)}
+          customerName={state.current.customerName}
+        />
+        {usedManufacturers.length > 0 && (
+          <div className="flex flex-wrap items-center gap-4 mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="text-sm text-slate-600">
+              {usedManufacturers.length > 1 ? "מערכות אלומיניום בהצעה:" : "מערכת אלומיניום בהצעה:"}
+            </span>
+            {usedManufacturers.map((m) => (
+              <ManufacturerBadge key={m.id} manufacturer={m} className="h-7" />
+            ))}
+          </div>
+        )}
+        {windowImportNote && (
+          <p
+            className={`text-sm mb-3 ${windowImportNote.tone === "error" ? "text-rose-700" : windowImportNote.tone === "warn" ? "text-amber-800" : "text-emerald-800"}`}
+            role="status"
+          >
+            {windowImportNote.text}
+          </p>
+        )}
         <div className="table-scroll" ref={itemsColumns.containerRef}>
           <table
             className="table-inner-min table-quote-items w-full text-sm"
@@ -1442,14 +1591,25 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       </Td>
                       <Td className="td-wrap-col">
                         <div className="flex items-start justify-end gap-1 w-full min-w-0">
-                          <button
-                            type="button"
-                            className="text-right flex-1 min-w-0 hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 min-h-[1.5rem] break-words"
-                            onClick={() => openExistingLineInAddItemModal(it.id)}
-                            title="לחץ לעריכת פריט (אותו חלון כמו + הוסף פריט)"
+                          <Select
+                            value={state.profiles.some((p) => p.id === it.profileId) ? it.profileId : undefined}
+                            onValueChange={(id) => {
+                              const profile = state.profiles.find((p) => p.id === id);
+                              if (!profile) return;
+                              onUpdateItem(it.id, applyProfileToLineItem(it, profile));
+                            }}
                           >
-                            {it.profileName || "\u00A0"}
-                          </button>
+                            <SelectTrigger
+                              className="h-auto min-h-8 flex-1 min-w-0 border-0 bg-transparent px-1 py-0.5 shadow-none whitespace-normal hover:bg-slate-100 [&>span]:line-clamp-none [&>span]:whitespace-normal"
+                              aria-label={`פרופיל שורה ${idx + 1}`}
+                              title="בחר פרופיל"
+                            >
+                              <SelectValue placeholder={it.profileName || "בחר פרופיל"} />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <ProfileOptions profiles={state.profiles} manufacturers={state.manufacturers} />
+                            </SelectContent>
+                          </Select>
                           <button
                             type="button"
                             className="shrink-0 mt-0.5 p-1 rounded-md text-sky-700 hover:bg-sky-100 border border-transparent hover:border-sky-200"
@@ -1463,6 +1623,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             <Pencil className="w-4 h-4" aria-hidden />
                           </button>
                         </div>
+                        {usedManufacturers.length > 0 && (
+                          <div className="px-1 mt-0.5">
+                            <ManufacturerBadge
+                              manufacturer={lineManufacturer(it, state.profiles, state.manufacturers)}
+                              className="h-4"
+                            />
+                          </div>
+                        )}
                       </Td>
                       <Td className="td-nowrap-col">
                         {editingCell?.itemId === it.id && editingCell?.field === "dims" ? (
@@ -1538,7 +1706,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                             onClick={() => { setEditingCell({ itemId: it.id, field: "details" }); setEditingValue(it.details || ""); }}
                             title="לחץ לעריכה"
                           >
-                            {[it.details, addonsText].filter(Boolean).join(" — ")}
+                            {it.configuration ? addonsText : [it.details, addonsText].filter(Boolean).join(" — ")}
                           </EditableCellButton>
                         )}
                       </Td>
@@ -1891,12 +2059,27 @@ const QuotePage: React.FC<QuotePageProps> = ({
       </section>
 
       <section className="card p-4 w-full">
-        <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-          <h2 className="text-xl font-semibold">מוצרים בהצעה</h2>
-          <span className="text-sm text-slate-600">שרטוט ומפרט לכל חלון ודלת — כך הם מופיעים ב-PDF אחרי טבלת הפריטים</span>
+        <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          <div className="min-w-0">
+            <h2 className="text-xl font-semibold">מוצרים בהצעה</h2>
+            <span className="text-sm text-slate-600">
+              שרטוט ומפרט לכל חלון ודלת — אחרי טבלת הפריטים ב-PDF
+            </span>
+          </div>
+          <label className="flex items-center gap-2 text-sm cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              className="w-4 h-4"
+              checked={state.current.includeProductDetails !== false}
+              onChange={(e) => updateCurrent("includeProductDetails", e.target.checked)}
+            />
+            <span>כלול שרטוט ומפרט ב-PDF</span>
+          </label>
         </div>
         <QuoteProductList
           items={state.current.items}
+          profiles={state.profiles}
+          manufacturers={state.manufacturers}
           onEditDrawing={(id) => {
             const item = state.current.items.find((line) => line.id === id);
             if (!item?.configuration) {
@@ -1971,6 +2154,14 @@ const QuotePage: React.FC<QuotePageProps> = ({
                       onChange={(v) => setAddProfileDraft((d) => ({ ...d, unitPrice: v }))}
                       inputMode="numeric"
                     />
+                    <label className="grid gap-1.5">
+                      <span className="text-sm text-slate-700">חברה (מערכת אלומיניום)</span>
+                      <CompanySelect
+                        value={addProfileDraft.manufacturerId}
+                        manufacturers={state.manufacturers}
+                        onChange={(id) => setAddProfileDraft((d) => ({ ...d, manufacturerId: id }))}
+                      />
+                    </label>
                   </div>
                   <div className="flex gap-2 pt-2">
                     <button
@@ -2050,7 +2241,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         const p = state.profiles.find((x) => x.id === pid);
                         if (!p) return;
                         setProfileModalEditId(pid);
-                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice) });
+                        setAddProfileDraft({ name: p.name, unitPrice: String(p.unitPrice), manufacturerId: p.manufacturerId });
                         setShowAddProfileModal(true);
                       } else if (id === "__empty__") {
                         setEditActiveProfileId(undefined);
@@ -2064,11 +2255,7 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     </SelectTrigger>
                     <SelectContent portalContainer={editItemModalContentEl}>
                       <SelectItem value="__empty__">— בחר/י —</SelectItem>
-                      {state.profiles.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.name}
-                        </SelectItem>
-                      ))}
+                      <ProfileOptions profiles={state.profiles} manufacturers={state.manufacturers} />
                       {editActiveProfileId && onUpdateProfileQuick && (
                         <SelectItem value="__edit_profile__">✏️ ערוך פרופיל...</SelectItem>
                       )}

@@ -37,10 +37,23 @@ export type Customer = {
   createdAt: number;
 };
 
+/** Aluminium system company whose profiles we sell (Alumil, קליל, EKLEIN, ...). */
+export type Manufacturer = {
+  id: string;
+  name: string;
+  /** Bundled path (/brand/...) or PNG data URL for user-added companies. */
+  logoUrl?: string;
+  website?: string;
+  /** Shipped with the app; cannot be deleted. */
+  builtin?: boolean;
+};
+
 export type Profile = {
   id: string;
   name: string;
   unitPrice: number; // price per m²
+  /** Unset means no company is shown for this profile. */
+  manufacturerId?: string;
 };
 
 export type Addon = {
@@ -108,6 +121,8 @@ export type Quote = {
   /** Running number for הצעת מחיר. Independent from חשבון עסקה. */
   quoteNumber?: number;
   showTotals?: boolean;
+  /** When false, the PDF stops after the items table (no per-window drawings). */
+  includeProductDetails?: boolean;
   totals: { sub: number; tax: number; grand: number };
 };
 
@@ -139,6 +154,8 @@ export type AppCurrentState = {
   notes: string;
   /** When false, don't show or calculate overall totals (subtotal/מע״מ/grand) in UI & PDF box */
   showTotals: boolean;
+  /** When false, omit שרטוט ומפרט pages that follow the items table in the PDF. */
+  includeProductDetails: boolean;
 };
 
 /** Dimension unit for width/height (stored internally in cm) */
@@ -148,6 +165,7 @@ export type AppState = {
   customers: Customer[];
   quotes: Quote[];
   profiles: Profile[];
+  manufacturers: Manufacturer[];
   addons: Addon[]; // Global addons that can be managed in settings
   current: AppCurrentState;
   ui: AppUIState;
