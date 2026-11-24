@@ -61,8 +61,12 @@ Put it behind HTTPS (reverse proxy) when it is not on the same machine.
 
 ## Connect the app
 
-In the app: **הגדרות → בדיקת מחירי שוק** → enter the endpoint URL and the access token → **בדיקת חיבור**.
-"מחובר — ספק החיפוש מוגדר" means live research is ready.
+The app no longer needs this server: by default it connects directly to Claude with an API key saved on
+the computer (the research code is shared, in `src/market/research.ts`). Use this server only when the
+key must not live on the desktop.
+
+In the app: **הגדרות — ניהול פרופילים ותוספות → חיבור לאינטרנט ול-AI → דרך שרת ביניים** → enter the
+endpoint URL and the access token → **בדיקת חיבור**.
 
 ## Expected cost (estimate — not yet measured on a live run)
 

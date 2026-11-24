@@ -1,14 +1,17 @@
-// Calls the market-research endpoint. Only the product spec is sent; the provider key stays on the endpoint.
+// Runs market research. Direct mode: the app calls Claude itself with the key saved on this computer.
+// Proxy mode: calls the deployed market-proxy, which holds the key. Either way only the product spec is sent.
 import {
   MARKET_CONTRACT_VERSION,
   MARKET_ERROR_LABELS,
   parseEvidence,
+  sanitizeSpec,
   type MarketErrorCode,
   type MarketEvidence,
   type MarketResearchResponse,
   type MarketSpec,
 } from "./contract";
-import type { MarketSettings } from "./types";
+import { isMarketConfigured, type MarketSettings } from "./types";
+import { anthropicCreateMessage, checkAnthropicKey, ProviderError, runResearch } from "./research";
 
 export class MarketRequestError extends Error {
   readonly code: MarketErrorCode;
@@ -24,12 +27,8 @@ function baseUrl(settings: MarketSettings): string {
   return settings.endpointUrl.trim().replace(/\/+$/, "");
 }
 
-function configured(settings: MarketSettings | undefined): settings is MarketSettings {
-  return Boolean(settings && settings.endpointUrl.trim() && settings.accessToken.trim());
-}
-
 async function call(settings: MarketSettings | undefined, path: string, init: RequestInit, timeoutMs: number): Promise<unknown> {
-  if (!configured(settings)) throw new MarketRequestError("missing_config");
+  if (!isMarketConfigured(settings)) throw new MarketRequestError("missing_config");
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
@@ -84,12 +83,42 @@ export function parseResearchResponse(raw: unknown): MarketResearchResponse {
   };
 }
 
+function fromProviderError(e: unknown): MarketRequestError {
+  if (e instanceof MarketRequestError) return e;
+  if (e instanceof ProviderError) return new MarketRequestError(e.code, e.code === "unauthorized" ? undefined : e.message);
+  return new MarketRequestError("provider_error", e instanceof Error ? e.message : undefined);
+}
+
+async function directResearch(settings: MarketSettings, spec: MarketSpec): Promise<MarketResearchResponse> {
+  // Same whitelist the server applies: nothing but product fields reaches the provider.
+  const clean = sanitizeSpec(spec);
+  if (!clean) throw new MarketRequestError("bad_request", "missing spec");
+  try {
+    // Pages the model cited but did not open cannot be fetched from the app (browser rules); they stay "not verified".
+    const raw = await runResearch(clean, { createMessage: anthropicCreateMessage(settings.apiKey, { browser: true }) });
+    return parseResearchResponse(raw);
+  } catch (e) {
+    throw fromProviderError(e);
+  }
+}
+
 export async function requestMarketResearch(settings: MarketSettings | undefined, spec: MarketSpec): Promise<MarketResearchResponse> {
+  if (!isMarketConfigured(settings)) throw new MarketRequestError("missing_config");
+  if (settings.mode === "direct") return directResearch(settings, spec);
   const body = await call(settings, "/v1/market-research", { method: "POST", body: JSON.stringify({ spec }) }, TIMEOUT_MS);
   return parseResearchResponse(body);
 }
 
 export async function checkMarketEndpoint(settings: MarketSettings | undefined): Promise<{ provider: string; providerConfigured: boolean }> {
+  if (!isMarketConfigured(settings)) throw new MarketRequestError("missing_config");
+  if (settings.mode === "direct") {
+    try {
+      await checkAnthropicKey(settings.apiKey, { browser: true });
+    } catch (e) {
+      throw fromProviderError(e);
+    }
+    return { provider: "anthropic", providerConfigured: true };
+  }
   const body = (await call(settings, "/v1/health", { method: "GET" }, 15000)) as { provider?: string; providerConfigured?: boolean };
   return { provider: body?.provider ?? "unknown", providerConfigured: Boolean(body?.providerConfigured) };
 }

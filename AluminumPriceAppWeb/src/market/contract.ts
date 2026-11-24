@@ -65,6 +65,11 @@ export type MarketSpec = {
   /** Unit our line is compared in. */
   unit: MarketUnit;
   scope: InstallScope;
+  /**
+   * "line" (default) = one quote line with its own sizes; "profile_rate" = a catalogue profile priced per m²,
+   * checked from the profiles settings without a specific window size.
+   */
+  purpose?: "line" | "profile_rate";
 };
 
 export type PriceKind =
@@ -178,12 +183,12 @@ export type MarketErrorCode =
   | "timeout";
 
 export const MARKET_ERROR_LABELS: Record<MarketErrorCode, string> = {
-  missing_config: "לא הוגדר שירות בדיקת מחירים (הגדרות ← בדיקת מחירי שוק)",
-  unauthorized: "קוד הגישה לשירות בדיקת המחירים שגוי",
+  missing_config: "לא הוגדר חיבור לבדיקת מחירים (הגדרות — ניהול פרופילים ותוספות ← בדיקת מחירי שוק)",
+  unauthorized: "מפתח ה-API או קוד הגישה לבדיקת המחירים שגוי",
   provider_not_configured: "מפתח ספק החיפוש חסר בשרת בדיקת המחירים",
   provider_error: "ספק החיפוש החזיר שגיאה",
   bad_request: "הבקשה נדחתה על ידי השירות",
-  network: "אין חיבור לשירות בדיקת המחירים",
+  network: "אין חיבור לאינטרנט או לשירות בדיקת המחירים",
   timeout: "הבדיקה ארכה יותר מדי זמן",
 };
 
@@ -287,6 +292,7 @@ export function sanitizeSpec(raw: unknown): MarketSpec | undefined {
     fixedSections: num(r.fixedSections),
     unit: oneOf(r.unit, UNITS, "unit"),
     scope: oneOf(r.scope, SCOPES, "unknown"),
+    purpose: r.purpose === "profile_rate" ? "profile_rate" : undefined,
   };
 }
 

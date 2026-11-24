@@ -3,7 +3,7 @@ import type { AppState } from "../types";
 import { MARKET_ERROR_LABELS } from "./contract";
 import { requestMarketResearch } from "./client";
 import { executeRun, planRun, quoteContext, vatRateOf, type MarketUpdate } from "./runner";
-import type { MarketCacheEntry } from "./types";
+import { isMarketConfigured, type MarketCacheEntry } from "./types";
 
 export type MarketBanner = { tone: "info" | "warn" | "error"; text: string } | null;
 
@@ -21,7 +21,7 @@ export function useMarketRunner(state: AppState, onUpdates: (updates: MarketUpda
     async (opts: { lineIds?: string[]; force?: boolean }) => {
       const s = stateRef.current;
       const settings = s.marketSettings;
-      if (!settings?.endpointUrl.trim() || !settings.accessToken.trim()) {
+      if (!isMarketConfigured(settings)) {
         setBanner({ tone: "error", text: MARKET_ERROR_LABELS.missing_config });
         return;
       }

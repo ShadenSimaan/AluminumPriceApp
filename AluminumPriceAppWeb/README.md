@@ -30,8 +30,14 @@ It is decision support only: it never changes catalogue prices, line prices, tot
 - Code: `src/market/` (spec builder, deterministic arithmetic, UI) and `market-proxy/` (authenticated
   endpoint holding the provider key; Claude web search + web fetch, with code-side source verification).
 - Setup, settings, costs and privacy: see [`market-proxy/README.md`](market-proxy/README.md).
-- In the app: הגדרות → בדיקת מחירי שוק → endpoint URL + access token → בדיקת חיבור. Then open a
-  quotation and click **בדיקת מחירי שוק** above the items table; ↻ **רענון שורה** re-searches one line.
+- In the app: **הגדרות — ניהול פרופילים ותוספות → בדיקת מחירי שוק לפרופילים → חיבור לאינטרנט ול-AI**.
+  Default is a **direct connection**: paste a Claude API key once and the app searches the web itself
+  (no server needed). A deployed `market-proxy` (endpoint URL + access token) is still supported.
+- **Profile prices:** in the same dialog every profile has a **מחיר שוק למ״ר** column. Click **בדיקה**
+  to search today's prices (original manufacturers + leading fabricators); the app verifies each source
+  and shows the average per m² before VAT, the range, the number of sellers and our gap. Click the
+  value to see every source and why it was or wasn't counted. **בדיקת כל הפרופילים** checks them all.
+- On a quotation, click **בדיקת מחירי שוק** above the items table; ↻ **רענון שורה** re-searches one line.
 - Results are stored on each line with their evidence, assumptions and retrieval date, so a saved
   quotation reopens with the same comparison. Editing a line's specification marks it "לא עדכני".
 - Tests: `npx vitest run src/market market-proxy`; end-to-end against the fixture endpoint:

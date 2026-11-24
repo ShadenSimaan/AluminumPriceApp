@@ -5,7 +5,7 @@ import { documentTypeLabel, normalizeDocumentType } from "./types";
 import { DEFAULT_RFQ_SETTINGS, normalizeRfqSlice } from "./rfq/rfqState";
 import { DEFAULT_MANUFACTURERS, normalizeManufacturers } from "./quote/manufacturers";
 import { defaultSeriesAppendix, normalizeSeriesAppendix } from "./quote/series/settings";
-import { DEFAULT_MARKET_SETTINGS, type MarketCacheEntry, type MarketSettings } from "./market/types";
+import { DEFAULT_MARKET_SETTINGS, type MarketCacheEntry, type MarketLineSnapshot, type MarketSettings } from "./market/types";
 
 export function uuid() {
   if ((crypto as any)?.randomUUID) return crypto.randomUUID();
@@ -78,14 +78,17 @@ export const DEFAULT_STATE: AppState = {
   rfqSettings: DEFAULT_RFQ_SETTINGS,
   marketSettings: { ...DEFAULT_MARKET_SETTINGS },
   marketCache: {},
+  profileMarket: {},
 };
 
 function normalizeMarketSettings(raw: unknown): MarketSettings {
   const r = (raw ?? {}) as Partial<MarketSettings>;
-  return {
-    endpointUrl: typeof r.endpointUrl === "string" ? r.endpointUrl : "",
-    accessToken: typeof r.accessToken === "string" ? r.accessToken : "",
-  };
+  const endpointUrl = typeof r.endpointUrl === "string" ? r.endpointUrl : "";
+  const accessToken = typeof r.accessToken === "string" ? r.accessToken : "";
+  const apiKey = typeof r.apiKey === "string" ? r.apiKey : "";
+  // Files saved before the direct connection existed keep using their configured server.
+  const mode = r.mode === "proxy" || r.mode === "direct" ? r.mode : endpointUrl && accessToken && !apiKey ? "proxy" : "direct";
+  return { mode, apiKey, endpointUrl, accessToken };
 }
 
 function normalizeMarketCache(raw: unknown): Record<string, MarketCacheEntry> {
@@ -95,6 +98,15 @@ function normalizeMarketCache(raw: unknown): Record<string, MarketCacheEntry> {
     if (v && typeof v === "object" && v.response && Array.isArray(v.response.evidence) && typeof v.response.retrievedAt === "string") {
       out[k] = v as MarketCacheEntry;
     }
+  }
+  return out;
+}
+
+function normalizeProfileMarket(raw: unknown): Record<string, MarketLineSnapshot> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, MarketLineSnapshot> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, any>)) {
+    if (v && typeof v === "object" && v.spec && Array.isArray(v.evidence) && typeof v.retrievedAt === "string") out[k] = v as MarketLineSnapshot;
   }
   return out;
 }
@@ -203,5 +215,6 @@ export function normalizeState(obj: unknown): AppState {
     ...normalizeRfqSlice(o as Record<string, unknown>),
     marketSettings: normalizeMarketSettings((o as any).marketSettings),
     marketCache: normalizeMarketCache((o as any).marketCache),
+    profileMarket: normalizeProfileMarket((o as any).profileMarket),
   };
 }

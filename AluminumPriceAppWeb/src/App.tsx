@@ -21,7 +21,8 @@ import { CompanySelect } from "./quote/ProfileOptions";
 import type { SupplierRequest } from "./rfq/types";
 import { buildCustomerQuoteFromRfq, type ConvertToQuoteOptions } from "./rfq/toCustomerQuote";
 import { dict, fmt } from "./rfq/i18n";
-import MarketSettingsSection from "./market/MarketSettingsSection";
+import { ProfileMarketCell, ProfileMarketDetails, ProfileMarketToolbar, useProfileMarket } from "./market/ProfileMarket";
+import { profileMarketStats } from "./market/profileCheck";
 import { applyMarketUpdate, pruneCache, type MarketUpdate } from "./market/runner";
 import type { MarketCacheEntry, MarketLineInputs } from "./market/types";
 
@@ -1149,6 +1150,19 @@ export default function App() {
   const [editingProfileCell, setEditingProfileCell] = useState<{ id: string; field: "name" | "unitPrice" } | null>(null);
   const [editingProfileValue, setEditingProfileValue] = useState("");
 
+  /** בדיקת מחירי שוק per profile (profiles settings) */
+  const profileMarket = useProfileMarket(state, setState);
+  const [expandedMarketProfile, setExpandedMarketProfile] = useState<string | null>(null);
+  async function checkAllProfilesMarket() {
+    const ids = state.profiles.map((p) => p.id);
+    if (!ids.length) return;
+    const ok = await confirmDestructive(
+      `לבדוק מחיר שוק ל-${ids.length} פרופילים? כל בדיקה מחפשת באינטרנט 1–3 דקות ועולה כ-1–3 ₪ (סה״כ כ-${ids.length}–${ids.length * 3} ₪).`,
+      { title: "בדיקת מחירי שוק", okLabel: "כן, לבדוק", cancelLabel: "ביטול" }
+    );
+    if (ok) void profileMarket.check(ids);
+  }
+
   /** ======= Settings dialog: addons CRUD ======= */
   const [addonDraft, setAddonDraft] = useState<{
     id?: string;
@@ -1358,10 +1372,10 @@ export default function App() {
       `האם אתה בטוח שברצונך למחוק את הפרופיל${label}?`
     );
     if (!confirmed) return;
-    setState((s) => ({
-      ...s,
-      profiles: s.profiles.filter((x) => x.id !== id),
-    }));
+    setState((s) => {
+      const { [id]: _removed, ...profileMarket } = s.profileMarket;
+      return { ...s, profiles: s.profiles.filter((x) => x.id !== id), profileMarket };
+    });
     if (activeProfileId === id) setActiveProfileId(undefined);
   }
 
@@ -1720,11 +1734,6 @@ export default function App() {
                 </div>
               </div>
 
-              <MarketSettingsSection
-                value={state.marketSettings}
-                onChange={(marketSettings) => setState((s) => ({ ...s, marketSettings }))}
-              />
-
               {/* App data file location (Tauri) */}
               {isTauri() && (
                 <DataFileLocation />
@@ -1874,11 +1883,21 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="border rounded-lg overflow-hidden">
-                <table className="w-full text-sm table-fixed">
+              <ProfileMarketToolbar
+                state={state}
+                setState={setState}
+                runningCount={profileMarket.running.size}
+                banner={profileMarket.banner}
+                onCheckAll={() => void checkAllProfilesMarket()}
+                onClearBanner={profileMarket.clearBanner}
+              />
+
+              <div className="border rounded-lg overflow-x-auto">
+                <table className="w-full min-w-[720px] text-sm table-fixed">
                   <colgroup>
-                    <col className="w-[46%]" />
+                    <col className="w-[32%]" />
                     <col className="w-[7.5rem]" />
+                    <col className="w-[11rem]" />
                     <col className="w-[8.5rem]" />
                     <col className="w-[4.5rem]" />
                   </colgroup>
@@ -1886,6 +1905,7 @@ export default function App() {
                     <tr>
                       <ThSettings>שם</ThSettings>
                       <ThSettings>מחיר למ״ר</ThSettings>
+                      <ThSettings>מחיר שוק למ״ר</ThSettings>
                       <ThSettings>חברה</ThSettings>
                       <ThSettings>פעולות</ThSettings>
                     </tr>
@@ -1894,7 +1914,7 @@ export default function App() {
                     {state.profiles.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={4}
+                          colSpan={5}
                           className="py-6 text-center text-slate-500"
                         >
                           אין פרופילים
@@ -1903,7 +1923,7 @@ export default function App() {
                     ) : (
                       groupProfilesByManufacturer(state.profiles, state.manufacturers).flatMap((group) => [
                         <tr key={`group-${group.manufacturer?.id ?? "none"}`} className="border-t bg-slate-100/70">
-                          <td colSpan={4} className="px-3 py-2">
+                          <td colSpan={5} className="px-3 py-2">
                             <div className="flex items-center gap-2">
                               {group.manufacturer ? (
                                 <>
@@ -1917,7 +1937,11 @@ export default function App() {
                             </div>
                           </td>
                         </tr>,
-                        ...group.profiles.map((p) => (
+                        ...group.profiles.flatMap((p) => {
+                        const marketStats = profileMarketStats(p, state.manufacturers, state.profileMarket[p.id]);
+                        const marketSnap = state.profileMarket[p.id];
+                        const marketOpen = expandedMarketProfile === p.id && Boolean(marketSnap);
+                        return [
                         <tr key={p.id} className="border-t">
                           <TdSettings className="whitespace-normal">
                             {editingProfileCell?.id === p.id && editingProfileCell?.field === "name" ? (
@@ -1968,6 +1992,18 @@ export default function App() {
                               </button>
                             )}
                           </TdSettings>
+                          <TdSettings className="whitespace-normal">
+                            <ProfileMarketCell
+                              stats={marketStats}
+                              running={profileMarket.running.has(p.id)}
+                              expanded={marketOpen}
+                              onCheck={() => {
+                                setExpandedMarketProfile(p.id);
+                                void profileMarket.check([p.id]);
+                              }}
+                              onToggle={() => setExpandedMarketProfile((cur) => (cur === p.id ? null : p.id))}
+                            />
+                          </TdSettings>
                           <TdSettings>
                             <CompanySelect
                               showLogo={false}
@@ -1984,8 +2020,18 @@ export default function App() {
                               מחיקה
                             </button>
                           </TdSettings>
-                        </tr>
-                        )),
+                        </tr>,
+                        ...(marketOpen && marketSnap
+                          ? [
+                              <tr key={`${p.id}-market`} className="border-t border-sky-100">
+                                <td colSpan={5} className="p-0">
+                                  <ProfileMarketDetails profile={p} stats={marketStats} snapshot={marketSnap} />
+                                </td>
+                              </tr>,
+                            ]
+                          : []),
+                        ];
+                        }),
                       ])
                     )}
                   </tbody>

@@ -40,14 +40,29 @@ export type MarketCacheEntry = {
   storedAt: string;
 };
 
+export type MarketConnectionMode =
+  /** The app calls Claude (web search + web fetch) itself with the API key saved on this computer. */
+  | "direct"
+  /** The app calls a deployed market-proxy that holds the API key (endpoint URL + access token). */
+  | "proxy";
+
 export type MarketSettings = {
+  mode: MarketConnectionMode;
+  /** Claude API key for the direct connection (console.anthropic.com → API keys). Saved only on this computer. */
+  apiKey: string;
   /** Base URL of the deployed market-proxy, e.g. https://alum-market.example.workers.dev */
   endpointUrl: string;
   /** Per-device access token for that endpoint (not the provider key). */
   accessToken: string;
 };
 
-export const DEFAULT_MARKET_SETTINGS: MarketSettings = { endpointUrl: "", accessToken: "" };
+export const DEFAULT_MARKET_SETTINGS: MarketSettings = { mode: "direct", apiKey: "", endpointUrl: "", accessToken: "" };
+
+export function isMarketConfigured(settings: MarketSettings | undefined): settings is MarketSettings {
+  if (!settings) return false;
+  if (settings.mode === "proxy") return Boolean(settings.endpointUrl.trim() && settings.accessToken.trim());
+  return Boolean(settings.apiKey.trim());
+}
 
 /** Cached research older than this is not reused automatically. */
 export const MARKET_CACHE_MAX_AGE_DAYS = 30;

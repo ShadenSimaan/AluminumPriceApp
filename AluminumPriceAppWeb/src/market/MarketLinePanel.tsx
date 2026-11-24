@@ -233,7 +233,7 @@ export default function MarketLinePanel({ line, index, comparison: c, build, run
   );
 }
 
-function SourcesTable({
+export function SourcesTable({
   snap,
   evaluations,
   warnings,

@@ -7,8 +7,5 @@
   "scripts": {
     "start": "node --experimental-strip-types src/node.ts",
     "deploy": "npx wrangler deploy"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^1.13.0"
   }
 }

@@ -77,8 +77,8 @@ describe("research verification (code, not model)", () => {
     };
     const r = await runResearch(spec, deps);
     expect(calls).toHaveLength(2); // pause_turn continued once
-    const p = calls[0] as { betas: string[]; fallbacks: string; tools: { type?: string; name: string }[]; messages: { content: string }[] };
-    expect(p.betas).toContain("server-side-fallback-2026-07-01");
+    // The fallback beta travels as the anthropic-beta header (see anthropicCreateMessage), not in the body.
+    const p = calls[0] as unknown as { fallbacks: string; tools: { type?: string; name: string }[]; messages: { content: string }[] };
     expect(p.fallbacks).toBe("default");
     expect(p.tools.map((t) => t.type ?? t.name)).toEqual(["web_search_20260318", "web_fetch_20260318", "submit_market_evidence"]);
     expect(r.source).toBe("live");

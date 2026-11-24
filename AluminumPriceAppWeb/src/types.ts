@@ -212,4 +212,6 @@ export type AppState = {
   marketSettings: MarketSettings;
   /** Research reused across lines/quotations with the same normalized specification. */
   marketCache: Record<string, MarketCacheEntry>;
+  /** Latest market-price check per profile (key = profile id), from הגדרות — ניהול פרופילים ותוספות. */
+  profileMarket: Record<string, MarketLineSnapshot>;
 };

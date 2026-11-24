@@ -98,7 +98,11 @@ export async function handle(request: Request, env: Env, depsOverride?: Research
   try {
     return json(await runResearch(spec, deps), 200, cors);
   } catch (e) {
-    if (e instanceof ProviderError) return fail(e.code, e.code === "timeout" ? 504 : 502, cors, e.message);
+    if (e instanceof ProviderError) {
+      // A rejected provider key is a server problem, not the app's access token.
+      const code = e.code === "unauthorized" || e.code === "network" ? "provider_error" : e.code;
+      return fail(code, code === "timeout" ? 504 : 502, cors, e.message);
+    }
     return fail("provider_error", 500, cors, e instanceof Error ? e.message.slice(0, 200) : "unknown");
   }
 }
