@@ -4,6 +4,7 @@ import type { AppState, Profile, Quote } from "./types";
 import { documentTypeLabel, normalizeDocumentType } from "./types";
 import { DEFAULT_RFQ_SETTINGS, normalizeRfqSlice } from "./rfq/rfqState";
 import { DEFAULT_MANUFACTURERS, normalizeManufacturers } from "./quote/manufacturers";
+import { defaultSeriesAppendix, normalizeSeriesAppendix } from "./quote/series/settings";
 
 export function uuid() {
   if ((crypto as any)?.randomUUID) return crypto.randomUUID();
@@ -63,6 +64,7 @@ export const DEFAULT_STATE: AppState = {
     notes: "",
     showTotals: true,
     includeProductDetails: true,
+    seriesAppendix: defaultSeriesAppendix(),
   },
   ui: { tab: "quote", settingsOpen: false, profilesSettingsOpen: false },
   pdfSaveFolder: undefined,
@@ -137,6 +139,7 @@ export function normalizeState(obj: unknown): AppState {
     notes: String(currentRaw.notes ?? ""),
     showTotals: currentRaw.showTotals !== false,
     includeProductDetails: currentRaw.includeProductDetails !== false,
+    seriesAppendix: normalizeSeriesAppendix(currentRaw.seriesAppendix),
   };
   const uiRaw: any = o.ui ?? {};
   // Legacy "supplier_import" tab is gone — quotation prices are imported on בקשה לספק.

@@ -1,7 +1,8 @@
 // FILE: src/pdfExporter.ts
 // Handles PDF export for the aluminum quote app
 
-import type { DocumentType, PdfDocumentKind } from "./types";
+import type { DocumentType, PdfDocumentKind, SeriesAppendixSettings } from "./types";
+import type { RfqItem } from "./rfq/types";
 import { ADDITION_PROFILE_LABEL, documentTypeFolderName, normalizeDocumentType } from "./types";
 
 // Check if running in Tauri
@@ -273,6 +274,10 @@ export interface PdfLineItem {
   subtotal?: number;
   addons: PdfAddon[];
   profileName?: string; // make sure this exists on your items
+  customerDescription?: string;
+  configuration?: RfqItem;
+  /** Estimator's explicit series for this line (see LineItem.seriesRefs). */
+  seriesRefs?: string[];
   /** Company of the line's profile; its logo is shown in the PDF. */
   manufacturer?: PdfManufacturer;
 }
@@ -308,6 +313,8 @@ export interface PdfQuotePayload {
   showTotals?: boolean;
   /** When false, skip the per-window drawings and specs after the items table. */
   includeProductDetails?: boolean;
+  /** Series information sheets appended after the quotation (absent = off). */
+  seriesAppendix?: SeriesAppendixSettings;
   /** True when the quote has not changed since it was last saved (shown in the "file exists" prompt). */
   quoteUnchanged?: boolean;
 }

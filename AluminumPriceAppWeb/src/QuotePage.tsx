@@ -20,6 +20,8 @@ import QuoteProductList from "./quote/QuoteProductList";
 import ManufacturerBadge from "./quote/ManufacturerBadge";
 import { CompanySelect, ProfileOptions } from "./quote/ProfileOptions";
 import { lineManufacturer, quoteManufacturers } from "./quote/manufacturers";
+import { SeriesAppendixControls } from "./quote/series/SeriesAppendixControls";
+import { defaultSeriesAppendix, normalizeSeriesAppendix } from "./quote/series/settings";
 import DocumentHeader from "./brand/DocumentHeader";
 import WindowImportNote from "./quote/WindowImportNote";
 import WindowImportPreview from "./quote/WindowImportPreview";
@@ -2094,6 +2096,22 @@ const QuotePage: React.FC<QuotePageProps> = ({
           onMoveDown={onMoveItemDown}
         />
       </section>
+
+      <SeriesAppendixControls
+        items={state.current.items}
+        profiles={state.profiles}
+        manufacturers={state.manufacturers}
+        settings={normalizeSeriesAppendix(state.current.seriesAppendix ?? defaultSeriesAppendix())}
+        onChangeSettings={(next) => updateCurrent("seriesAppendix", next)}
+        onMapItemSeries={(itemId, seriesKeys) => {
+          const item = state.current.items.find((line) => line.id === itemId);
+          if (!item) return;
+          const next = { ...item };
+          if (seriesKeys === undefined) delete next.seriesRefs;
+          else next.seriesRefs = seriesKeys;
+          onUpdateItem(itemId, withSubtotal(next));
+        }}
+      />
 
       {/* Edit Item Modal */}
       {editingItemId && editDraft && (
