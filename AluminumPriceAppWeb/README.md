@@ -20,6 +20,23 @@ A desktop application for creating and managing aluminum price quotes, built wit
 - Customer management
 - Profile management (window types and pricing)
 
+## בדיקת מחירי שוק (internal market-price comparison)
+
+On the quotation screen, **בדיקת מחירי שוק** compares each line's actual selling price (after the
+quotation discount, before VAT, in the line's own unit) with current Israeli market prices, and
+summarises the quotation as an index (100 = market) with coverage by line count and by value.
+It is decision support only: it never changes catalogue prices, line prices, totals or the customer PDF.
+
+- Code: `src/market/` (spec builder, deterministic arithmetic, UI) and `market-proxy/` (authenticated
+  endpoint holding the provider key; Claude web search + web fetch, with code-side source verification).
+- Setup, settings, costs and privacy: see [`market-proxy/README.md`](market-proxy/README.md).
+- In the app: הגדרות → בדיקת מחירי שוק → endpoint URL + access token → בדיקת חיבור. Then open a
+  quotation and click **בדיקת מחירי שוק** above the items table; ↻ **רענון שורה** re-searches one line.
+- Results are stored on each line with their evidence, assumptions and retrieval date, so a saved
+  quotation reopens with the same comparison. Editing a line's specification marks it "לא עדכני".
+- Tests: `npx vitest run src/market market-proxy`; end-to-end against the fixture endpoint:
+  `node scripts/e2e-market.mjs` (see header of that file).
+
 ## Development
 
 ### Prerequisites

@@ -5,6 +5,7 @@ import { documentTypeLabel, normalizeDocumentType } from "./types";
 import { DEFAULT_RFQ_SETTINGS, normalizeRfqSlice } from "./rfq/rfqState";
 import { DEFAULT_MANUFACTURERS, normalizeManufacturers } from "./quote/manufacturers";
 import { defaultSeriesAppendix, normalizeSeriesAppendix } from "./quote/series/settings";
+import { DEFAULT_MARKET_SETTINGS, type MarketCacheEntry, type MarketSettings } from "./market/types";
 
 export function uuid() {
   if ((crypto as any)?.randomUUID) return crypto.randomUUID();
@@ -75,7 +76,28 @@ export const DEFAULT_STATE: AppState = {
   nextSupplierRequestNumber: 1,
   nextQuoteNumber: 1,
   rfqSettings: DEFAULT_RFQ_SETTINGS,
+  marketSettings: { ...DEFAULT_MARKET_SETTINGS },
+  marketCache: {},
 };
+
+function normalizeMarketSettings(raw: unknown): MarketSettings {
+  const r = (raw ?? {}) as Partial<MarketSettings>;
+  return {
+    endpointUrl: typeof r.endpointUrl === "string" ? r.endpointUrl : "",
+    accessToken: typeof r.accessToken === "string" ? r.accessToken : "",
+  };
+}
+
+function normalizeMarketCache(raw: unknown): Record<string, MarketCacheEntry> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, MarketCacheEntry> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, any>)) {
+    if (v && typeof v === "object" && v.response && Array.isArray(v.response.evidence) && typeof v.response.retrievedAt === "string") {
+      out[k] = v as MarketCacheEntry;
+    }
+  }
+  return out;
+}
 
 /** ===== Normalize a raw object into valid AppState (for LS or data file) ===== */
 export function normalizeState(obj: unknown): AppState {
@@ -179,5 +201,7 @@ export function normalizeState(obj: unknown): AppState {
     nextQuoteNumber:
       typeof o.nextQuoteNumber === "number" && o.nextQuoteNumber > 0 ? Math.floor(o.nextQuoteNumber) : 1,
     ...normalizeRfqSlice(o as Record<string, unknown>),
+    marketSettings: normalizeMarketSettings((o as any).marketSettings),
+    marketCache: normalizeMarketCache((o as any).marketCache),
   };
 }

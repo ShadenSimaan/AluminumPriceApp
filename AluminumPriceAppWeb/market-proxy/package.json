@@ -1,0 +1,14 @@
+{
+  "name": "alum-market-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Authenticated endpoint that runs Israeli market-price research for the quotation app. Holds the provider key.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/node.ts",
+    "deploy": "npx wrangler deploy"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.13.0"
+  }
+}

@@ -1,6 +1,7 @@
 // FILE: src/types.ts
 import type { RfqItem, RfqSettings, SupplierRequest } from "./rfq/types";
 import type { PriceBasis } from "./quote/pricing";
+import type { MarketCacheEntry, MarketLineInputs, MarketLineSnapshot, MarketSettings } from "./market/types";
 
 /** Document kind for PDF / saved file identity (priced documents only) */
 export type DocumentType = "quote" | "payment_request";
@@ -100,6 +101,10 @@ export type LineItem = {
   seriesRefs?: string[];
   addons: Addon[];
   subtotal: number; // computed
+  /** Internal market-price comparison (evidence snapshot). Never priced, never on the customer PDF. */
+  marketCheck?: MarketLineSnapshot;
+  /** Estimator inputs used only by the market comparison (screened area, confirmed model). */
+  marketInputs?: MarketLineInputs;
 };
 
 /** Per-quotation choice of supplementary series sheets appended after the quotation. */
@@ -203,4 +208,8 @@ export type AppState = {
   /** Next serial for הצעת מחיר */
   nextQuoteNumber: number;
   rfqSettings: RfqSettings;
+  /** Endpoint + access token for בדיקת מחירי שוק (the provider key lives on that endpoint). */
+  marketSettings: MarketSettings;
+  /** Research reused across lines/quotations with the same normalized specification. */
+  marketCache: Record<string, MarketCacheEntry>;
 };

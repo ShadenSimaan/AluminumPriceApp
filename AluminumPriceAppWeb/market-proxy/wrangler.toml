@@ -1,0 +1,13 @@
+name = "alum-market-proxy"
+main = "src/worker.ts"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Model and effort for the research call. Leave MARKET_FIXTURES unset in production.
+MARKET_MODEL = "claude-opus-5-5"
+MARKET_EFFORT = "medium"
+ALLOWED_ORIGINS = "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:5173"
+
+# Secrets (not in this file):
+#   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put MARKET_APP_TOKEN

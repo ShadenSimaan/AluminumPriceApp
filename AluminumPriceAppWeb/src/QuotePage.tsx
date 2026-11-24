@@ -1,6 +1,6 @@
 // FILE: src/QuotePage.tsx
 import React, { useMemo } from "react";
-import { Pencil, Save, Settings } from "lucide-react";
+import { Pencil, Save, Search, Settings } from "lucide-react";
 import {
   AppState,
   LineItem,
@@ -30,6 +30,13 @@ import WindowPicker from "./quote/WindowPicker";
 import { importWindowsFromFile, quoteLineFromWindow } from "./quote/windowImport";
 import RfqItemEditor from "./rfq/RfqItemEditor";
 import RfqImportDialog from "./rfq/RfqImportDialog";
+import MarketLinePanel from "./market/MarketLinePanel";
+import MarketSummaryCard from "./market/MarketSummaryCard";
+import { buildAll, quoteContext, type MarketUpdate } from "./market/runner";
+import { compareLine, summarizeQuote } from "./market/compute";
+import { specKey } from "./market/spec";
+import { useMarketRunner } from "./market/useMarketRunner";
+import type { MarketCacheEntry, MarketLineInputs } from "./market/types";
 import {
   Select,
   SelectContent,
@@ -120,7 +127,12 @@ type QuotePageProps = {
   onDuplicateItem?: (id: string) => void;
   /** Map source profile keys → target catalog profile ids for the whole quotation. */
   onRemapQuoteProfiles?: (mapping: Record<string, string>) => void;
+  /** Internal market comparison: merge results into the lines (never changes prices). */
+  onMarketUpdates?: (updates: MarketUpdate[], cache?: MarketCacheEntry) => void;
+  onMarketInputs?: (lineId: string, inputs: MarketLineInputs) => void;
 };
+
+const noMarketUpdates = () => {};
 
 /** Convert stored cm to display value (cm or mm) */
 function cmToDisplay(cm: number, unit: "cm" | "mm"): number {
@@ -295,6 +307,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
   onAddConfiguredLines,
   onDuplicateItem,
   onRemapQuoteProfiles,
+  onMarketUpdates,
+  onMarketInputs,
 }) => {
   const [editingItemId, setEditingItemId] = React.useState<string | null>(null);
   const [showAddProfileModal, setShowAddProfileModal] = React.useState(false);
@@ -578,6 +592,39 @@ const QuotePage: React.FC<QuotePageProps> = ({
     [state.current.items, state.current.freeFormAdditions, state.current.taxPercentText, state.current.discountPercentText]
   );
   const totalSubTotal = priced.sub;
+
+  // ---- בדיקת מחירי שוק (internal decision support; reads the quotation, never writes prices) ----
+  const market = useMarketRunner(state, onMarketUpdates ?? noMarketUpdates);
+  const [marketVisible, setMarketVisible] = React.useState(() => state.current.items.some((it) => it.marketCheck));
+  React.useEffect(() => {
+    // Reopening a quotation that was compared shows its saved comparison.
+    if (state.current.items.some((it) => it.marketCheck)) setMarketVisible(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.current.quoteId]);
+  const marketBuilds = useMemo(
+    () => buildAll(state.current.items, quoteContext({ profiles: state.profiles, manufacturers: state.manufacturers, current: state.current })),
+    [state.current, state.profiles, state.manufacturers]
+  );
+  const marketComparisons = useMemo(
+    () =>
+      state.current.items.map((it) => {
+        const b = marketBuilds.get(it.id)!;
+        return compareLine({
+          line: it,
+          snapshot: it.marketCheck,
+          currentSpecKey: specKey(b.spec),
+          currentUnit: b.spec.unit,
+          comparable: b.comparable,
+          notComparableReason: b.notComparableReason,
+          discountRate: priced.discountRate,
+        });
+      }),
+    [state.current.items, marketBuilds, priced.discountRate]
+  );
+  const marketSummary = useMemo(
+    () => summarizeQuote({ items: state.current.items, comparisons: marketComparisons, freeFormAdditions: state.current.freeFormAdditions, money: priced }),
+    [state.current.items, marketComparisons, state.current.freeFormAdditions, priced]
+  );
 
   const taxDecimal = useMemo(() => {
     const raw = state.current.taxPercentText ?? "18";
@@ -1486,6 +1533,21 @@ const QuotePage: React.FC<QuotePageProps> = ({
                 החלף פרופיל בהצעה
               </button>
             )}
+            {state.current.items.length > 0 && (
+              <button
+                type="button"
+                className="px-4 py-2 rounded-lg bg-white border border-slate-400 text-slate-800 text-sm hover:bg-slate-50 inline-flex items-center gap-1.5"
+                onClick={() => {
+                  setMarketVisible(true);
+                  void market.runAll();
+                }}
+                title="השוואת מחירי המכירה שלנו למחירי שוק עדכניים בישראל — פנימי, לא משנה את ההצעה"
+              >
+                <Search className="w-4 h-4" aria-hidden />
+                בדיקת מחירי שוק
+                {market.running.size > 0 && <span className="text-xs text-slate-500">({market.running.size} בבדיקה…)</span>}
+              </button>
+            )}
             <button type="button" className="px-4 py-2 rounded-lg bg-sky-600 text-white text-sm" onClick={() => setWindowPickerOpen(true)}>
               בחר או הגדר חלון / דלת
             </button>
@@ -1513,6 +1575,16 @@ const QuotePage: React.FC<QuotePageProps> = ({
           >
             {windowImportNote.text}
           </p>
+        )}
+        {marketVisible && state.current.items.length > 0 && (
+          <MarketSummaryCard
+            summary={marketSummary}
+            banner={market.banner}
+            runningCount={market.running.size}
+            hasFixture={state.current.items.some((it) => it.marketCheck?.source === "fixture")}
+            hasCache={state.current.items.some((it) => it.marketCheck?.source === "cache")}
+            onHide={() => setMarketVisible(false)}
+          />
         )}
         <div className="table-scroll" ref={itemsColumns.containerRef}>
           <table
@@ -1571,8 +1643,8 @@ const QuotePage: React.FC<QuotePageProps> = ({
                     .join(" • ");
 
                   return (
+                    <React.Fragment key={it.id}>
                     <tr
-                      key={it.id}
                       data-drag-row="item"
                       data-item-id={it.id}
                       className={`border-b ${dragState?.type === "item" && dragState?.id === it.id ? "opacity-50" : ""}`}
@@ -1798,6 +1870,23 @@ const QuotePage: React.FC<QuotePageProps> = ({
                         </button>
                       </Td>
                     </tr>
+                    {marketVisible && (
+                      <tr data-drag-row="item" data-item-id={it.id} className="border-b">
+                        <td colSpan={9} className="px-1 pt-0 pb-2">
+                          <MarketLinePanel
+                            line={it}
+                            index={idx}
+                            comparison={marketComparisons[idx]}
+                            build={marketBuilds.get(it.id)!}
+                            running={market.running.has(it.id)}
+                            discountPercent={priced.discountRate * 100}
+                            onRefresh={() => void market.refreshLine(it.id)}
+                            onInputs={(inputs) => onMarketInputs?.(it.id, inputs)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   );
                 })
               )}

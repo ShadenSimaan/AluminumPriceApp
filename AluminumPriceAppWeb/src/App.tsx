@@ -21,6 +21,9 @@ import { CompanySelect } from "./quote/ProfileOptions";
 import type { SupplierRequest } from "./rfq/types";
 import { buildCustomerQuoteFromRfq, type ConvertToQuoteOptions } from "./rfq/toCustomerQuote";
 import { dict, fmt } from "./rfq/i18n";
+import MarketSettingsSection from "./market/MarketSettingsSection";
+import { applyMarketUpdate, pruneCache, type MarketUpdate } from "./market/runner";
+import type { MarketCacheEntry, MarketLineInputs } from "./market/types";
 
 /** =========================
  *  Constants & Utilities
@@ -406,6 +409,27 @@ function saveQuoteToState(
   return { nextState, quote, quoteUnchanged };
 }
 
+/**
+ * Market data lives on the line. When the open document is a saved quote and the line content still matches the
+ * saved line, the saved copy receives the same market data, without touching its date or totals.
+ */
+function patchSavedQuoteMarket(s: AppState, items: LineItem[]): Quote[] {
+  const qid = s.current.quoteId;
+  if (!qid) return s.quotes;
+  return s.quotes.map((q) => {
+    if (q.id !== qid || q.items.length !== items.length) return q;
+    let changed = false;
+    const next = q.items.map((qi, i) => {
+      const ci = items[i];
+      if (qi.marketCheck === ci.marketCheck && qi.marketInputs === ci.marketInputs) return qi;
+      if (JSON.stringify(normalizeLineItemForCompare(qi)) !== JSON.stringify(normalizeLineItemForCompare(ci))) return qi;
+      changed = true;
+      return { ...qi, marketCheck: ci.marketCheck, marketInputs: ci.marketInputs };
+    });
+    return changed ? { ...q, items: next } : q;
+  });
+}
+
 /** =========================
  *  App Component
  *  ========================= */
@@ -655,9 +679,32 @@ export default function App() {
       ...s,
       current: {
         ...s.current,
-        items: s.current.items.map((it) => (it.id === id ? withSubtotal(updated) : it)),
+        // Market fields are only changed by the market handlers below; an edit built from an older draft keeps them.
+        items: s.current.items.map((it) =>
+          it.id === id ? withSubtotal({ ...updated, marketCheck: it.marketCheck, marketInputs: it.marketInputs }) : it
+        ),
       },
     }));
+  }, []);
+
+  /** Market results arrive asynchronously and are merged into the quotation as it is now. Prices are not touched. */
+  const applyMarketUpdates = useCallback((updates: MarketUpdate[], cache?: MarketCacheEntry) => {
+    setState((s) => {
+      const byLine = new Map(updates.map((u) => [u.lineId, u]));
+      const items = s.current.items.map((it) => {
+        const u = byLine.get(it.id);
+        return u ? { ...it, marketCheck: applyMarketUpdate(it.marketCheck, u) } : it;
+      });
+      const marketCache = cache ? pruneCache({ ...s.marketCache, [cache.researchKey]: cache }) : s.marketCache;
+      return { ...s, marketCache, current: { ...s.current, items }, quotes: patchSavedQuoteMarket(s, items) };
+    });
+  }, []);
+
+  const updateLineMarketInputs = useCallback((id: string, inputs: MarketLineInputs) => {
+    setState((s) => {
+      const items = s.current.items.map((it) => (it.id === id ? { ...it, marketInputs: inputs } : it));
+      return { ...s, current: { ...s.current, items }, quotes: patchSavedQuoteMarket(s, items) };
+    });
   }, []);
 
   function moveItemUp(id: string) {
@@ -1560,6 +1607,8 @@ export default function App() {
             onAddConfiguredLines={addConfiguredLines}
             onDuplicateItem={duplicateItem}
             onRemapQuoteProfiles={remapQuoteProfiles}
+            onMarketUpdates={applyMarketUpdates}
+            onMarketInputs={updateLineMarketInputs}
           />
         ) : state.ui.tab === "rfq" ? (
           <React.Suspense fallback={<div className="card p-6 text-center text-slate-500">…</div>}>
@@ -1670,6 +1719,11 @@ export default function App() {
                   </label>
                 </div>
               </div>
+
+              <MarketSettingsSection
+                value={state.marketSettings}
+                onChange={(marketSettings) => setState((s) => ({ ...s, marketSettings }))}
+              />
 
               {/* App data file location (Tauri) */}
               {isTauri() && (
