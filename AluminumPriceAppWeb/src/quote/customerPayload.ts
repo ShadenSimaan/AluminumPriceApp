@@ -17,6 +17,7 @@ const LINE_KEYS = [
   "customerDescription",
   "profileName",
   "subtotal",
+  "seriesRefs",
 ] as const;
 
 function customerConfiguration(configuration: RfqItem | undefined): RfqItem | undefined {
@@ -39,6 +40,7 @@ export function toCustomerPdfItem(item: LineItem): PdfLineItem {
     customerDescription: item.customerDescription,
     profileName: item.profileName,
     subtotal: item.subtotal,
+    seriesRefs: item.seriesRefs ? [...item.seriesRefs] : undefined,
     addons: (item.addons ?? []).map((addon) => ({ name: addon.name, price: addon.price, checked: addon.checked })),
     configuration: customerConfiguration(item.configuration),
   };
@@ -95,6 +97,7 @@ export function toCustomerPdfPayload(
     dimensionUnit: extra.dimensionUnit,
     showTotals: current.showTotals,
     includeProductDetails: current.includeProductDetails,
+    seriesAppendix: current.seriesAppendix,
     pdfDateMs: extra.pdfDateMs,
     quoteUnchanged: extra.quoteUnchanged,
   };

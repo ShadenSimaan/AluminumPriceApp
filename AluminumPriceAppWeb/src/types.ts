@@ -93,8 +93,26 @@ export type LineItem = {
   configuration?: RfqItem;
   /** Internal only: the drawing is a source image that was not converted into panels. */
   configurationNeedsReview?: boolean;
+  /**
+   * Estimator's explicit window/door series for this line (catalog keys such as "klil/4400").
+   * Unset = recognised automatically; an empty list = this line has no series sheet.
+   */
+  seriesRefs?: string[];
   addons: Addon[];
   subtotal: number; // computed
+};
+
+/** Per-quotation choice of supplementary series sheets appended after the quotation. */
+export type SeriesAppendixSettings = {
+  enabled: boolean;
+  /** Series keys the estimator removed from this quote; newly recognised series start selected. */
+  excluded: string[];
+  content: {
+    photos: boolean;
+    glass: boolean;
+    colors: boolean;
+    screens: boolean;
+  };
 };
 
 export type Quote = {
@@ -123,6 +141,8 @@ export type Quote = {
   showTotals?: boolean;
   /** When false, the PDF stops after the items table (no per-window drawings). */
   includeProductDetails?: boolean;
+  /** Absent on quotes saved before series sheets existed (= off). */
+  seriesAppendix?: SeriesAppendixSettings;
   totals: { sub: number; tax: number; grand: number };
 };
 
@@ -156,6 +176,7 @@ export type AppCurrentState = {
   showTotals: boolean;
   /** When false, omit שרטוט ומפרט pages that follow the items table in the PDF. */
   includeProductDetails: boolean;
+  seriesAppendix: SeriesAppendixSettings;
 };
 
 /** Dimension unit for width/height (stored internally in cm) */

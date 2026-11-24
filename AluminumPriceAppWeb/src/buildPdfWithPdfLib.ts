@@ -9,6 +9,8 @@ import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage, type PDFP
 import fontkit from "@pdf-lib/fontkit";
 import { isOpenAreaRate, lineTotal as pricedLineTotal, lineUnitPrice, parseLooseNumber, quoteMoney } from "./quote/pricing";
 import { drawQuoteProducts } from "./quote/quotePdfProducts";
+import { computeAppendixPlan, hasAppendix } from "./quote/series/appendix";
+import { drawSeriesAppendix } from "./quote/series/seriesPdf";
 import { imageKind, loadLogoBytes } from "./quote/manufacturers";
 import { drawCompanyLogoHeader, embedCompanyLogo } from "./brand/logoAsset";
 
@@ -1172,6 +1174,15 @@ export async function buildQuotePdfBytes(payload: PdfQuotePayload): Promise<Uint
       items,
       companyLogos,
       footerLabel: `${quoteLabel} · ${customerLabel}`,
+    });
+  }
+
+  const seriesPlan = computeAppendixPlan(items, payload.seriesAppendix);
+  if (hasAppendix(seriesPlan)) {
+    await drawSeriesAppendix({
+      doc,
+      fonts: { hebrew: hebrewFont, latin: latinFont, latinBold, hebrewChars: new Set(hebrewFont.getCharacterSet()) },
+      plan: seriesPlan,
     });
   }
 

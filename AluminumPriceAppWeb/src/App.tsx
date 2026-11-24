@@ -14,6 +14,7 @@ import { applyCustomerImport, type DraftRow } from "./customers/customerImport";
 import { quoteMoney } from "./quote/pricing";
 import { duplicateLineItem, lineAfterProfileSync, remapQuoteItems, withSubtotal } from "./quote/windowLine";
 import { toCustomerPdfPayload } from "./quote/customerPayload";
+import { defaultSeriesAppendix, normalizeSeriesAppendix } from "./quote/series/settings";
 import { groupProfilesByManufacturer, logoFileToPngDataUrl } from "./quote/manufacturers";
 import ManufacturerBadge from "./quote/ManufacturerBadge";
 import { CompanySelect } from "./quote/ProfileOptions";
@@ -88,6 +89,7 @@ function emptyCurrentState(): AppCurrentState {
     installationTerms: "",
     showTotals: true,
     includeProductDetails: true,
+    seriesAppendix: defaultSeriesAppendix(),
   };
 }
 
@@ -188,6 +190,7 @@ function normalizeLineItemForCompare(it: LineItem) {
     configurationLayout: it.configuration ? JSON.stringify(it.configuration.layout) : "",
     location: it.location ?? "",
     details: it.details ?? "",
+    seriesRefs: it.seriesRefs ?? null,
     subtotal: roundMoney(it.subtotal),
     addons: (it.addons ?? []).map((a) => ({
       name: a.name,
@@ -234,6 +237,7 @@ function buildQuoteContentSnapshotFromCurrent(current: AppCurrentState) {
     quoteNumber: current.quoteNumber ?? null,
     showTotals: current.showTotals !== false,
     includeProductDetails: current.includeProductDetails !== false,
+    seriesAppendix: normalizeSeriesAppendix(current.seriesAppendix),
   };
 }
 
@@ -256,6 +260,7 @@ function buildQuoteContentSnapshotFromQuote(q: Quote) {
     quoteNumber: q.quoteNumber ?? null,
     showTotals: q.showTotals !== false,
     includeProductDetails: q.includeProductDetails !== false,
+    seriesAppendix: normalizeSeriesAppendix(q.seriesAppendix),
   };
 }
 
@@ -379,6 +384,7 @@ function saveQuoteToState(
     quoteNumber: documentType === "quote" ? quoteNumber : existingQuote?.quoteNumber,
     showTotals: withCustomer.current.showTotals,
     includeProductDetails: withCustomer.current.includeProductDetails,
+    seriesAppendix: normalizeSeriesAppendix(withCustomer.current.seriesAppendix),
     totals,
   };
 
@@ -880,6 +886,7 @@ export default function App() {
         notes: q.notes ?? "",
         showTotals: q.showTotals !== false,
         includeProductDetails: q.includeProductDetails !== false,
+        seriesAppendix: normalizeSeriesAppendix(q.seriesAppendix),
       },
       };
     });
