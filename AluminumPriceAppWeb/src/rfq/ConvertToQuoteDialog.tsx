@@ -12,11 +12,15 @@ export default function ConvertToQuoteDialog({
   draft,
   onCancel,
   onConfirm,
+  onImportPrices,
+  onEnterPrices,
 }: {
   lang: RfqLanguage;
   draft: SupplierRequest;
   onCancel: () => void;
   onConfirm: (opts: ConvertToQuoteOptions) => void;
+  onImportPrices: () => void;
+  onEnterPrices: () => void;
 }) {
   const d = dict(lang);
   const dir = dirOf(lang);
@@ -53,6 +57,16 @@ export default function ConvertToQuoteDialog({
     <RfqModal title={d.ui.convertToQuote} onClose={onCancel} dir={dir} wide>
       <div className="grid gap-4">
         <p className="text-sm text-slate-600">{d.ui.convertToQuoteHint}</p>
+
+        <div className="rounded-md border border-slate-200 p-3 grid gap-2">
+          <div className="text-sm font-medium text-slate-800">{d.ui.priceSource}</div>
+          <p className="text-sm text-slate-600">{d.ui.priceSourceHint}</p>
+          <div className="flex flex-wrap gap-2">
+            <Btn onClick={onImportPrices}>{d.ui.importQuotation}</Btn>
+            <Btn onClick={onEnterPrices}>{d.ui.manualQuotation}</Btn>
+          </div>
+          {preview.pricedCount === 0 && <div className="text-sm text-amber-800">{d.ui.convertNeedsPrices}</div>}
+        </div>
 
         <div className="grid sm:grid-cols-2 gap-3">
           <Field label={d.ui.customerName} className="sm:col-span-2">

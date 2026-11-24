@@ -25,6 +25,7 @@ import RfqDiagram, { RfqLegend } from "./RfqDiagram";
 import RfqItemEditor from "./RfqItemEditor";
 import RfqImportDialog from "./RfqImportDialog";
 import QuotationImportDialog from "./QuotationImportDialog";
+import ManualQuotationDialog from "./ManualQuotationDialog";
 import ConvertToQuoteDialog from "./ConvertToQuoteDialog";
 import SupplierDialog, { CatalogList } from "./SupplierDialog";
 import { openWebsite } from "./supplierUi";
@@ -67,8 +68,7 @@ export default function RfqPage({
 
   const [editing, setEditing] = useState<{ item: RfqItem; isNew: boolean } | null>(null);
   const [importing, setImporting] = useState(false);
-  const [importingQuote, setImportingQuote] = useState(false);
-  const [convertingQuote, setConvertingQuote] = useState(false);
+  const [quoteFlow, setQuoteFlow] = useState<null | "convert" | "import" | "manual">(null);
   const [busy, setBusy] = useState(false);
 
   const confirm = (message: string) =>
@@ -370,16 +370,12 @@ export default function RfqPage({
               <Btn onClick={() => void exportRequestFile()}>{d.ui.exportRequestFile}</Btn>
             </div>
             <div className="flex flex-wrap items-end gap-2">
-              <Btn variant="primary" onClick={() => setImportingQuote(true)}>
-                {d.ui.importQuotation}
-              </Btn>
               <Btn
                 variant="success"
-                disabled={!onConvertToCustomerQuote || pricedCount === 0}
-                title={pricedCount === 0 ? d.ui.convertNeedsPrices : d.ui.convertToQuote}
+                disabled={!onConvertToCustomerQuote}
                 onClick={() => {
-                  if (pricedCount === 0) return showToast(d.ui.convertNeedsPrices, "error");
-                  setConvertingQuote(true);
+                  if (!draft.items.length) return showToast(d.ui.needItems, "error");
+                  setQuoteFlow("convert");
                 }}
               >
                 {d.ui.convertToQuote}
@@ -583,11 +579,13 @@ export default function RfqPage({
                           {it.supplierPrice && (
                             <div className="text-xs text-emerald-800 mt-1" dir="ltr">
                               <div className="font-semibold">{moneyIls.format(it.supplierPrice.lineTotalIls)}</div>
-                              <div className="text-slate-500">
-                                {it.supplierPrice.currency === "USD"
-                                  ? moneyUsd.format(it.supplierPrice.lineTotalOriginal)
-                                  : `${it.supplierPrice.lineTotalOriginal} ${it.supplierPrice.currency}`}
-                              </div>
+                              {it.supplierPrice.currency !== "ILS" && (
+                                <div className="text-slate-500">
+                                  {it.supplierPrice.currency === "USD"
+                                    ? moneyUsd.format(it.supplierPrice.lineTotalOriginal)
+                                    : `${it.supplierPrice.lineTotalOriginal} ${it.supplierPrice.currency}`}
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -716,17 +714,32 @@ export default function RfqPage({
           }}
         />
       )}
-      {importingQuote && draft && (
+      {quoteFlow && draft && onConvertToCustomerQuote && (
+        <div className={quoteFlow === "convert" ? "contents" : "hidden"}>
+          <ConvertToQuoteDialog
+            lang={lang}
+            draft={draft}
+            onCancel={() => setQuoteFlow(null)}
+            onImportPrices={() => setQuoteFlow("import")}
+            onEnterPrices={() => setQuoteFlow("manual")}
+            onConfirm={(opts) => {
+              setQuoteFlow(null);
+              onConvertToCustomerQuote(draft, opts);
+            }}
+          />
+        </div>
+      )}
+      {quoteFlow === "import" && draft && (
         <QuotationImportDialog
           lang={lang}
           draft={draft}
-          onCancel={() => setImportingQuote(false)}
+          onCancel={() => setQuoteFlow("convert")}
           onCommit={(next, summary) => {
             onChange((s) => {
               const withDraft = { ...s, rfqDraft: syncQuestions(next, supplierProfileFor(s.rfqSettings, next)) };
               return saveDraft(withDraft);
             });
-            setImportingQuote(false);
+            setQuoteFlow("convert");
             showToast(
               summary.unmatched > 0
                 ? fmt(d.ui.quotationPartial, { matched: summary.matched, unmatched: summary.unmatched })
@@ -736,14 +749,19 @@ export default function RfqPage({
           }}
         />
       )}
-      {convertingQuote && draft && onConvertToCustomerQuote && (
-        <ConvertToQuoteDialog
+      {quoteFlow === "manual" && draft && (
+        <ManualQuotationDialog
+          key={draft.id}
           lang={lang}
-          draft={draft}
-          onCancel={() => setConvertingQuote(false)}
-          onConfirm={(opts) => {
-            setConvertingQuote(false);
-            onConvertToCustomerQuote(draft, opts);
+          request={draft}
+          onCancel={() => setQuoteFlow("convert")}
+          onCommit={(next, priced) => {
+            onChange((s) => {
+              const withDraft = { ...s, rfqDraft: syncQuestions(next, supplierProfileFor(s.rfqSettings, next)) };
+              return saveDraft(withDraft);
+            });
+            setQuoteFlow("convert");
+            showToast(priced > 0 ? fmt(d.ui.manualPricesSaved, { n: priced }) : d.ui.manualPricesCleared, "success");
           }}
         />
       )}

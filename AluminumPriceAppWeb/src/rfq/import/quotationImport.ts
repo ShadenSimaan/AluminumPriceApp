@@ -271,6 +271,95 @@ export function applyQuotationToRequest(
   return { request, matched, unmatchedFile, unmatchedRequest };
 }
 
+export type ManualQuotationLine = {
+  itemId: string;
+  /** Line total in the chosen currency. `null` clears the price for that window. */
+  lineTotal: number | null;
+};
+
+export type ManualQuotationInput = {
+  currency: string;
+  /** Ignored when currency is ILS (rate is 1). */
+  exchangeRateToIls: number;
+  quotationNumber: string;
+  quotationDate: string;
+  packaging: number | null;
+  transport: number | null;
+  lines: ManualQuotationLine[];
+  now?: number;
+};
+
+/**
+ * Write supplier prices typed per window. Each line total is for that window's quantity.
+ * A null line clears that window. With no prices and no extras, the quotation is removed.
+ */
+export function applyManualQuotation(
+  req: SupplierRequest,
+  input: ManualQuotationInput
+): { request: SupplierRequest; priced: number } {
+  const currency = (input.currency || "ILS").trim().toUpperCase() || "ILS";
+  const rate = currency === "ILS" ? 1 : input.exchangeRateToIls;
+  if (!(rate > 0)) throw new Error("exchange rate must be positive");
+
+  const byId = new Map(input.lines.map((line) => [line.itemId, line.lineTotal]));
+  let priced = 0;
+  const items: RfqItem[] = req.items.map((item) => {
+    if (!byId.has(item.id)) return item;
+    const lineTotal = byId.get(item.id);
+    if (lineTotal == null || !isFinite(lineTotal) || lineTotal < 0) {
+      const rest: RfqItem = { ...item };
+      delete rest.supplierPrice;
+      return rest;
+    }
+    priced += 1;
+    const qty = item.quantity > 0 ? item.quantity : 1;
+    const line = roundMoney(lineTotal);
+    const unit = roundMoney(line / qty);
+    const supplierPrice: RfqItemSupplierPrice = {
+      currency,
+      unitPriceOriginal: unit,
+      screenPriceOriginal: 0,
+      lineTotalOriginal: line,
+      unitPriceIls: toIls(unit, rate),
+      screenPriceIls: 0,
+      lineTotalIls: toIls(line, rate),
+    };
+    return { ...item, supplierPrice };
+  });
+
+  const packaging = input.packaging != null && isFinite(input.packaging) && input.packaging >= 0 ? roundMoney(input.packaging) : null;
+  const transport = input.transport != null && isFinite(input.transport) && input.transport >= 0 ? roundMoney(input.transport) : null;
+  const hasExtras = packaging != null || transport != null;
+  if (priced === 0 && !hasExtras) {
+    return { request: { ...req, items, supplierQuotation: undefined, quotationStatus: "pending" }, priced: 0 };
+  }
+
+  const productSubtotalOriginal = roundMoney(items.reduce((sum, item) => sum + (item.supplierPrice?.lineTotalOriginal ?? 0), 0));
+  const grandOriginal = roundMoney(productSubtotalOriginal + (packaging ?? 0) + (transport ?? 0));
+  const now = input.now ?? Date.now();
+  const supplierQuotation: SupplierQuotationInfo = {
+    quotationNumber: input.quotationNumber.trim(),
+    quotationDate: input.quotationDate.trim(),
+    currency,
+    exchangeRateToIls: rate,
+    productSubtotalOriginal,
+    packagingOriginal: packaging,
+    inlandTransportOriginal: transport,
+    grandTotalOriginal: grandOriginal,
+    productSubtotalIls: toIls(productSubtotalOriginal, rate),
+    packagingIls: packaging == null ? null : toIls(packaging, rate),
+    inlandTransportIls: transport == null ? null : toIls(transport, rate),
+    grandTotalIls: toIls(grandOriginal, rate),
+    importedAt: now,
+    sourceFileName: "",
+  };
+
+  return {
+    request: { ...req, items, supplierQuotation, quotationStatus: "done" },
+    priced,
+  };
+}
+
 export function requestHasSupplierPrices(req: Pick<SupplierRequest, "items" | "supplierQuotation" | "quotationStatus">): boolean {
   return req.quotationStatus === "done" || !!req.supplierQuotation || req.items.some((it) => it.supplierPrice != null);
 }
